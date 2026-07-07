@@ -2,254 +2,568 @@
 
 ## Mục lục
 
-- [Tổng quan](#tổng-quan)
-- [Use Cases phổ biến](#use-cases-phổ-biến)
-- [1. Bên trong: intset, listpack, hashtable](#1-bên-trong-intset-listpack-hashtable)
-- [2. Command chính & độ phức tạp](#2-command-chính--độ-phức-tạp)
-- [3. Set algebra — UNION / INTER / DIFF hoạt động thế nào](#3-set-algebra--union--inter--diff-hoạt-động-thế-nào)
-- [4. Random members — SRANDMEMBER & SPOP](#4-random-members--srandmember--spop)
-- [5. Patterns thực tế](#5-patterns-thực-tế)
-- [6. Case study thực tế](#6-case-study-thực-tế)
-- [7. Best Practices](#7-best-practices)
+- [1. Set: khi thứ ta cần là tính duy nhất](#1-set-khi-thứ-ta-cần-là-tính-duy-nhất)
+- [2. Set là gì — mô hình tư duy đúng](#2-set-là-gì--mô-hình-tư-duy-đúng)
+- [3. Chọn đúng cấu trúc: Set vs Sorted Set vs HyperLogLog vs Bitmap](#3-chọn-đúng-cấu-trúc-set-vs-sorted-set-vs-hyperloglog-vs-bitmap)
+- [4. Bên trong Redis Set: intset, listpack, hashtable](#4-bên-trong-redis-set-intset-listpack-hashtable)
+- [5. Command chính: return value, atomicity và độ phức tạp](#5-command-chính-return-value-atomicity-và-độ-phức-tạp)
+- [6. Set algebra deep dive — SINTER / SUNION / SDIFF](#6-set-algebra-deep-dive--sinter--sunion--sdiff)
+- [7. Random members — SRANDMEMBER vs SPOP](#7-random-members--srandmember-vs-spop)
+- [8. Duyệt Set lớn: SSCAN và cursor semantics](#8-duyệt-set-lớn-sscan-và-cursor-semantics)
+- [9. Performance notes & benchmark thực tế](#9-performance-notes--benchmark-thực-tế)
+- [10. Patterns thực tế](#10-patterns-thực-tế)
+- [11. Case study thực tế](#11-case-study-thực-tế)
+- [12. Anti-patterns cần tránh](#12-anti-patterns-cần-tránh)
+- [13. Best Practices](#13-best-practices)
+- [14. Tóm tắt — cheat-sheet & 3 nguyên tắc](#14-tóm-tắt--cheat-sheet--3-nguyên-tắc)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
 
-## Tổng quan
+## 1. Set: khi thứ ta cần là tính duy nhất
 
-Set là **tập hợp không thứ tự các string duy nhất** — thêm trùng sẽ bị bỏ qua (idempotent). Sức mạnh của Set nằm ở hai điểm: kiểm tra membership O(1) và **phép toán tập hợp chạy ngay trên server** (union, intersection, difference).
+Rất nhiều bài toán thực tế quy về cùng một câu hỏi: **"phần tử này đã có chưa?"** — user đã xem bài viết chưa, event này đã xử lý chưa, tài khoản có nằm trong whitelist không. Khi đó thứ ta cần không phải một danh sách có thứ tự, mà là một **tập hợp các phần tử duy nhất** với khả năng kiểm tra membership tức thì.
 
+Đó là Redis Set: tập hợp không thứ tự các string, tự động khử trùng, cho phép hỏi "có/không" trong O(1) và — điểm mạnh riêng của Redis — thực hiện **phép toán tập hợp (giao, hợp, hiệu) ngay trên server**.
+
+```bash
+SADD seen:2026-07-07 evt_8Kj2m       # trả 1 nếu mới, 0 nếu đã có
+SISMEMBER whitelist user:42          # O(1): user có trong whitelist?
+SINTER follow:alice follow:bob       # bạn chung của alice và bob
 ```
-tags:post:1 = { "redis", "cache", "db" }
-                    │
-   SISMEMBER O(1)   │   SINTER tags:post:1 tags:post:2  → tag chung
-   SADD idempotent  │   SUNION ... → gộp, tự khử trùng
-```
+
+Một giá trị hay bị bỏ qua nằm ở return value của `SADD`. Vì nó cho biết phần tử là mới hay đã tồn tại, ta có thể gộp "kiểm tra rồi thêm" thành **một lệnh atomic** — thay cho cặp đọc-rồi-ghi vốn tốn 2 round-trip và dễ dính race condition.
+
+Doc này mổ xẻ Redis Set từ trong ra ngoài: ba encoding nội bộ (intset, listpack, hashtable), complexity thật của `SINTER`/`SUNION`/`SDIFF`, cách random sampling hoạt động, ràng buộc khi chạy trên Cluster, và những anti-pattern có thể làm production treo chỉ vì một lệnh `SMEMBERS` vô tình.
 
 ---
 
-## Use Cases phổ biến
+## 2. Set là gì — mô hình tư duy đúng
 
-| Use Case | Vì sao Set |
-|----------|-----------|
-| **Tag / label** | Phần tử unique, tìm giao giữa các tag bằng SINTER |
-| **Unique visitor theo ngày** | SADD idempotent — cùng user tính 1 lần |
-| **Quan hệ follow / friend** | SINTER tìm bạn chung, SDIFF gợi ý follow |
-| **Whitelist / blacklist** | SISMEMBER O(1) trong request path |
-| **Lottery / random sampling** | SPOP, SRANDMEMBER |
-| **Job đã xử lý (dedup)** | SADD trả 0 nếu đã tồn tại → skip |
+Set là **tập hợp không thứ tự các string duy nhất**. Không có index theo vị trí, không có score, không có thứ tự ổn định. Thứ Set làm cực tốt:
 
-Nếu cần đếm unique với hàng trăm triệu phần tử mà chấp nhận sai số ~0.8% → [HyperLogLog](./bitmaps-hyperloglog.md) chỉ tốn 12KB.
+- **Uniqueness**: thêm trùng không đổi dữ liệu (`SADD` idempotent)
+- **Membership**: `SISMEMBER` trung bình O(1)
+- **Cardinality**: `SCARD` O(1)
+- **Set algebra**: giao/hợp/hiệu trên server (`SINTER`, `SUNION`, `SDIFF`)
+
+```diagram
+Request path: "user 42 đã thấy event chưa?"
+
+Client
+  │
+  │ SADD seen:2026-07-07 evt_abc
+  ▼
+Redis Set
+  ├─ evt_001
+  ├─ evt_abc  ← nếu chưa có: thêm và trả 1
+  └─ evt_xyz     nếu đã có: không thêm và trả 0
+  │
+  ▼
+App quyết định xử lý/skip mà không cần SISMEMBER trước
+```
+
+Ví dụ trực quan:
+
+```bash
+SADD tags:post:1 redis cache db        # → 3
+SADD tags:post:1 redis                 # → 0 (đã tồn tại)
+SISMEMBER tags:post:1 cache            # → 1
+SCARD tags:post:1                      # → 3
+```
+
+> [!NOTE]
+> “Không thứ tự” nghĩa là output của `SMEMBERS`/`SSCAN` không phải contract. Nếu UI cần ranking, thời gian, pagination ổn định theo score → dùng [Sorted Set](./sorted-sets.md).
 
 ---
 
-## 1. Bên trong: intset, listpack, hashtable
+## 3. Chọn đúng cấu trúc: Set vs Sorted Set vs HyperLogLog vs Bitmap
 
-Set có **3 encoding**, Redis tự nâng cấp khi dữ liệu thay đổi:
+Redis có nhiều cấu trúc nhìn qua đều giải quyết “unique/counted membership”. Khác biệt nằm ở câu hỏi bạn cần trả lời.
 
-| Encoding | Điều kiện | Cấu trúc |
-|----------|-----------|----------|
-| `intset` | Tất cả phần tử là số nguyên, ≤ `set-max-intset-entries` (512) | Mảng số nguyên **sorted**, lookup bằng binary search O(log N) |
-| `listpack` | Có phần tử không phải số, ít phần tử & ngắn (Redis 7.2+) | Khối memory liên tục, scan tuyến tính |
-| `hashtable` | Vượt ngưỡng | dict với value = NULL, lookup O(1) |
+| Nhu cầu | Set | Sorted Set | HyperLogLog | Bitmap |
+|---------|-----|------------|-------------|--------|
+| “User X có trong nhóm không?” | ✅ O(1), chính xác | ✅ O(log N), có score | ❌ không membership | ✅ nếu ID là integer dense |
+| “Có bao nhiêu unique user?” | ✅ `SCARD` chính xác, tốn memory theo N | ✅ `ZCARD` chính xác | ✅ xấp xỉ ~0.81%, ~12KB/key | ✅ `BITCOUNT`, rất rẻ nếu ID dense |
+| “Top/range theo thời gian/điểm” | ❌ | ✅ mạnh nhất | ❌ | ❌ |
+| “TTL riêng từng member” | ❌ | ✅ score=expire_at + `ZREMRANGEBYSCORE` | ❌ | ❌ |
+| “100M visitor/day chỉ cần đếm” | ⚠️ memory lớn | ⚠️ memory lớn | ✅ xem [Bitmaps & HyperLogLog](./bitmaps-hyperloglog.md) | ✅ nếu user id dense |
+| “Tập tag, friend, permission” | ✅ tự nhiên | ⚠️ chỉ khi cần score | ❌ | ❌ |
+
+> [!TIP]
+> Quy tắc chọn nhanh: **cần biết member cụ thể có tồn tại không → Set**. Chỉ cần đếm unique khổng lồ → HyperLogLog. Cần thứ tự/range/TTL per-member → Sorted Set. ID số dày đặc và cần bit-level memory → Bitmap.
+
+---
+
+## 4. Bên trong Redis Set: intset, listpack, hashtable
+
+Redis Set có 3 encoding. API bên ngoài giống nhau, nhưng memory và CPU rất khác.
+
+| Encoding | Khi nào dùng | Cấu trúc | Điểm mạnh | Điểm yếu |
+|----------|--------------|----------|-----------|----------|
+| `intset` | Tất cả member là integer và số lượng ≤ `set-max-intset-entries` (mặc định 512) | Mảng integer **sorted** liên tục | Memory cực thấp, binary search | Insert O(N) vì phải dịch mảng |
+| `listpack` | Redis 7.2+, set nhỏ có non-integer, member ngắn | Khối memory liên tục encode từng entry | Ít overhead pointer | Lookup/insert scan tuyến tính |
+| `hashtable` | Vượt ngưỡng hoặc member dài | `dict` với `value = NULL` | Membership trung bình O(1) | Overhead memory lớn hơn |
+
+Config mặc định liên quan:
 
 ```bash
 set-max-intset-entries 512
-set-max-listpack-entries 128
-set-max-listpack-value 64      # độ dài tối đa mỗi phần tử để giữ listpack
+set-max-listpack-entries 128      # Redis 7.2+
+set-max-listpack-value 64         # bytes, Redis 7.2+
 ```
 
-Chi tiết đáng chú ý về `intset`:
+### 4.1. intset — mảng sorted nhỏ nhưng rất tiết kiệm
 
-- Mảng **sorted, không con trỏ** → memory tối thiểu (set 512 số int64 ≈ 4KB thay vì ~30KB hashtable)
-- Có cơ chế **upgrade encoding nội bộ**: bắt đầu lưu int16, gặp số lớn hơn thì nâng cả mảng lên int32/int64 — không bao giờ downgrade
-- Insert là O(N) (phải dịch mảng giữ sorted) — chấp nhận được vì N ≤ 512
+```diagram
+SADD nums 10 3 7
 
+Bước 1: Redis thấy tất cả là integer
+Bước 2: lưu dạng intset sorted
+
+intset<int16>
+  len=3
+  contents=[3, 7, 10]
+
+SISMEMBER nums 7
+  → binary search trong [3, 7, 10]
 ```
-127.0.0.1:6379> SADD nums 1 2 3         → OBJECT ENCODING nums  → "intset"
-127.0.0.1:6379> SADD nums "abc"         → OBJECT ENCODING nums  → "listpack"
-# thêm > 128 phần tử hoặc phần tử > 64 bytes → "hashtable"
+
+`intset` có chi tiết rất đáng nhớ: nó bắt đầu bằng integer width nhỏ nhất (`int16`), rồi upgrade khi gặp số lớn hơn.
+
+```diagram
+contents=[1, 2, 30000]          → int16 đủ chứa
+SADD nums 100000                → cần int32
+Redis allocate mảng int32 mới
+copy + convert toàn bộ phần tử
+contents=[1, 2, 30000, 100000]  → int32
+
+Sau đó SREM 100000?
+Không downgrade về int16.
 ```
-
-Một khi đã lên `hashtable` thì **không quay lại** encoding nhỏ kể cả khi SREM bớt phần tử.
-
----
-
-## 2. Command chính & độ phức tạp
-
-| Command | Complexity | Ghi chú |
-|---------|-----------|---------|
-| `SADD key m1 m2 ...` | O(1)/phần tử | trả về số phần tử **mới** thêm được |
-| `SREM key m` | O(1) | |
-| `SISMEMBER key m` | O(1) | |
-| `SMISMEMBER key m1 m2` | O(N) | check nhiều member 1 round-trip (Redis 6.2+) |
-| `SCARD key` | O(1) | size lưu sẵn |
-| `SMEMBERS key` | O(N) | **trả toàn bộ** — nguy hiểm với set lớn |
-| `SSCAN key cursor` | O(1)/lần gọi | duyệt an toàn — cùng cơ chế cursor với SCAN |
-| `SPOP key [count]` | O(1) | lấy ngẫu nhiên **và xóa** |
-| `SRANDMEMBER key [count]` | O(N) worst | lấy ngẫu nhiên, **không xóa** |
-| `SMOVE src dst m` | O(1) | atomic giữa 2 set |
-| `SINTER` / `SUNION` / `SDIFF` | mục 3 | |
-| `SINTERCARD numkeys k1 k2 [LIMIT n]` | như SINTER | chỉ đếm, không trả phần tử (Redis 7+) |
 
 > [!IMPORTANT]
-> `SMEMBERS` trên set 1 triệu phần tử = block event loop + đẩy vài chục MB vào output buffer. Với set lớn, luôn dùng `SSCAN`.
+> `intset` upgrade `int16 → int32 → int64` nhưng **không downgrade**. Tương tự, một Set đã chuyển sang `hashtable` thì không tự quay lại `intset/listpack` sau khi bạn `SREM` bớt member.
+
+Vì sao insert O(N) vẫn ổn? Vì N mặc định tối đa 512. Dịch 512 integer trong memory liên tục rẻ hơn giữ cả đống pointer của hashtable.
+
+### 4.2. listpack — Redis 7.2+ cho Set nhỏ không thuần integer
+
+Trước Redis 7.2, set có string non-integer thường chuyển thẳng hashtable. Redis 7.2 thêm listpack cho set nhỏ để giảm overhead.
+
+```bash
+SADD colors red blue green
+OBJECT ENCODING colors
+# Redis 7.2+ có thể trả "listpack" nếu không vượt ngưỡng
+```
+
+Điều kiện giữ listpack:
+
+- Số entry ≤ `set-max-listpack-entries` (128)
+- Mỗi member dài ≤ `set-max-listpack-value` (64 bytes)
+- Không bị convert sang hashtable trước đó
+
+> [!CAUTION]
+> Tăng threshold listpack quá cao có thể tiết kiệm memory nhưng làm CPU tăng vì lookup phải scan tuyến tính. Threshold mặc định là trade-off đã được Redis chọn cho workload phổ thông.
+
+### 4.3. hashtable — dict chỉ cần key, value = NULL
+
+Khi Set lớn, Redis dùng dictionary. Với Set, member chính là key trong dict; value không cần nên để `NULL`.
+
+```diagram
+Set key = followers:alice
+Redis object encoding = hashtable
+
+Dict table
+  bucket 18 → "bob"   -> NULL
+  bucket 44 → "carol" -> NULL
+  bucket 91 → "dave"  -> NULL
+
+SISMEMBER followers:alice carol
+  hash("carol") → bucket 44 → compare key → found
+```
+
+Trung bình membership O(1), nhưng memory gồm hash table array, dict entry, SDS string, allocator overhead. Đó là lý do 512 `int64` trong `intset` chỉ khoảng **4KB payload**, còn hashtable có thể lớn hơn nhiều lần.
 
 ---
 
-## 3. Set algebra — UNION / INTER / DIFF hoạt động thế nào
+## 5. Command chính: return value, atomicity và độ phức tạp
+
+| Command | Complexity | Return value / ghi chú |
+|---------|------------|------------------------|
+| `SADD key m1 m2 ...` | O(1)/member trung bình | Trả **số member mới được thêm** |
+| `SREM key m1 m2 ...` | O(1)/member trung bình | Trả **số member thực sự bị xóa** |
+| `SISMEMBER key m` | O(1) trung bình | 1/0 |
+| `SMISMEMBER key m1 m2 ...` | O(N) theo số member hỏi | Batch membership trong 1 round-trip (Redis 6.2+) |
+| `SCARD key` | O(1) | Cardinality lưu sẵn |
+| `SMEMBERS key` | O(N) | Trả toàn bộ set — nguy hiểm với set lớn |
+| `SSCAN key cursor [MATCH p] [COUNT n]` | O(1) mỗi call, O(N) toàn vòng | Duyệt incremental, không block dài |
+| `SPOP key [count]` | O(1) không count; O(N) theo count | Random và **xóa** |
+| `SRANDMEMBER key [count]` | O(1) không count; O(N) theo `abs(count)` | Random, **không xóa** |
+| `SMOVE src dst member` | O(1) | Atomic move giữa 2 set |
+| `SINTERCARD numkeys ... [LIMIT n]` | như `SINTER`, có thể dừng sớm | Chỉ đếm giao, Redis 7.0+ |
+
+Aha moment phổ biến nhất:
 
 ```bash
-SADD skill:redis  alice bob carol
-SADD skill:java   bob carol dave
+# ❌ Thừa round-trip, còn có race nếu tách logic phức tạp phía app
+SISMEMBER processed evt_1
+SADD processed evt_1
 
-SINTER skill:redis skill:java        → bob, carol      (giao)
-SUNION skill:redis skill:java        → cả 4 người      (hợp)
-SDIFF  skill:redis skill:java        → alice           (có redis, không java)
-
-# Biến thể *STORE: lưu kết quả thành key mới thay vì trả về client
-SINTERSTORE both:redis-java 2 skill:redis skill:java
+# ✅ Một lệnh atomic, return value là câu trả lời
+SADD processed evt_1
+# 1 = tôi là người đầu tiên thêm
+# 0 = event đã được worker khác thấy trước
 ```
 
-Độ phức tạp — quan trọng khi set lớn:
-
-| Phép | Complexity | Cách server thực hiện |
-|------|-----------|----------------------|
-| `SINTER` | O(N×M) — N = size set **nhỏ nhất**, M = số set | Sort các set theo size, duyệt set nhỏ nhất, check membership từng phần tử trong các set còn lại — vì vậy giao của set 100 phần tử với set 10 triệu phần tử vẫn nhanh |
-| `SUNION` | O(N) — N = **tổng** phần tử | Duyệt hết tất cả |
-| `SDIFF` | O(N) — N = tổng phần tử | Duyệt set đầu, loại phần tử có trong các set sau |
-
-Hai điểm thực chiến:
-
-1. **Kết quả có thể rất lớn** — `SUNION` 10 set × 1 triệu phần tử tạo reply khổng lồ. Dùng `*STORE` + `SSCAN` kết quả, hoặc `SINTERCARD` nếu chỉ cần đếm
-2. **Cluster**: các key trong một phép set phải nằm **cùng hash slot** — dùng hash tag `{user}:a`, `{user}:b` — xem [Redis Cluster](./cluster.md)
+> [!IMPORTANT]
+> `SADD` và `SREM` trả về **count changed**, không phải “OK”. Đây là tín hiệu dedup/idempotency miễn phí. Đừng bỏ phí nó.
 
 ---
 
-## 4. Random members — SRANDMEMBER & SPOP
+## 6. Set algebra deep dive — SINTER / SUNION / SDIFF
 
-Hai lệnh này khác nhau ở chỗ có xóa hay không, và hành vi `count`:
+Set algebra là lý do Redis Set vượt xa “hash set trong app”. Thay vì kéo dữ liệu về client rồi intersect, bạn gửi tên key và để Redis làm trong memory.
 
 ```bash
-SRANDMEMBER wheel 3     # 3 phần tử KHÁC nhau (count dương — không lặp)
-SRANDMEMBER wheel -5    # 5 lần rút CÓ lặp (count âm)
-SPOP lottery 2          # rút 2 và XÓA khỏi set — mỗi vé chỉ trúng 1 lần
+SADD skill:redis alice bob carol
+SADD skill:java  bob carol dave
+
+SINTER skill:redis skill:java    # bob, carol
+SUNION skill:redis skill:java    # alice, bob, carol, dave
+SDIFF  skill:redis skill:java    # alice
 ```
 
-Vì sao "random" được O(1): với encoding hashtable, Redis chọn **bucket ngẫu nhiên** rồi lấy phần tử trong đó. Hệ quả: phân bố chỉ *xấp xỉ* đều (bucket ít phần tử có xác suất nhỉnh hơn) — đủ tốt cho lottery/sampling, không dùng làm nguồn random mật mã.
+### 6.1. SINTER: vì sao small ∩ huge vẫn nhanh?
+
+Redis documentation mô tả complexity `SINTER` là **O(N*M)**, trong đó N là cardinality của set nhỏ nhất, M là số set. Điều này không phải ngẫu nhiên: Redis drive thuật toán bằng set nhỏ nhất.
+
+```diagram
+SINTER tag:redis tag:backend tag:hot
+
+Sizes:
+  tag:redis   = 1,000,000
+  tag:backend =   800,000
+  tag:hot     =       120  ← nhỏ nhất
+
+Algorithm:
+  1. Sort input sets theo cardinality tăng dần
+  2. Iterate 120 member của tag:hot
+  3. Với mỗi member, SISMEMBER trong tag:backend và tag:redis
+  4. Nếu có mặt ở tất cả → đưa vào kết quả
+
+Work ≈ 120 × 2 membership checks, không phải scan 1.8 triệu member.
+```
+
+| Phép | Complexity | Server làm gì | Khi nào nguy hiểm |
+|------|------------|---------------|-------------------|
+| `SINTER` | O(N*M), N=set nhỏ nhất, M=số set | Duyệt set nhỏ nhất, check membership trong set còn lại | Kết quả lớn hoặc mọi set đều lớn |
+| `SUNION` | O(total members) | Duyệt tất cả, add vào result set để khử trùng | Union nhiều big set trả về client |
+| `SDIFF` | O(total members) | Lấy set đầu làm base, loại member xuất hiện ở set sau | Set đầu cực lớn |
+| `SINTERSTORE`/`SUNIONSTORE`/`SDIFFSTORE` | tương tự | Lưu result vào key đích | Quên TTL cho key tạm |
+| `SINTERCARD ... LIMIT n` | như `SINTER`, dừng khi đủ limit | Chỉ đếm, không materialize result | Không dùng được nếu cần danh sách member |
+
+> [!TIP]
+> Cần hỏi “hai user có ít nhất 3 bạn chung không?” dùng `SINTERCARD 2 following:a following:b LIMIT 3`. Redis có thể dừng khi thấy đủ 3, không cần trả danh sách bạn chung về client.
+
+### 6.2. STORE variants — cứu output buffer
+
+```bash
+SINTERSTORE tmp:search:{u42}:1 tag:{u42}:redis tag:{u42}:backend
+EXPIRE tmp:search:{u42}:1 30
+SSCAN tmp:search:{u42}:1 0 COUNT 100
+```
+
+`*STORE` hữu ích khi kết quả lớn hoặc cần reuse nhiều lần. Nhưng nhớ TTL: key tạm không TTL là memory leak trá hình.
+
+### 6.3. Cluster: tất cả key trong set-op phải cùng hash slot
+
+Trong Redis Cluster, một lệnh nhiều key chỉ chạy nếu các key nằm cùng slot. Set algebra không ngoại lệ.
+
+```bash
+# ❌ Có thể CROSSSLOT
+SINTER following:alice followers:bob
+
+# ✅ Hash tag ép cùng slot phần nằm trong {...}
+SINTER following:{alice} muted:{alice}
+SUNION tag:{tenant42}:redis tag:{tenant42}:cache
+```
+
+Xem thêm [Redis Cluster](./cluster.md) để hiểu hash slot và hash tag.
+
+> [!WARNING]
+> Đừng thiết kế key set-op theo kiểu `tag:redis`, `tenant:42` rồi hy vọng cluster tự “join distributed”. Redis Cluster không scatter-gather set algebra cho bạn.
 
 ---
 
-## 5. Patterns thực tế
+## 7. Random members — SRANDMEMBER vs SPOP
 
-### 5.1 Dedup job / event
+Hai lệnh cùng “random”, nhưng semantics khác hẳn.
 
-```bash
-# Worker nhận event, chỉ xử lý nếu chưa từng thấy:
-SADD processed:2026-07-07 evt:8812     # → 1 = mới, 0 = đã xử lý → skip
-EXPIRE processed:2026-07-07 172800 NX
-```
-
-Atomic nhờ single-thread: hai worker cùng SADD một event thì chỉ đúng một worker nhận `1`.
-
-### 5.2 Bạn chung / gợi ý kết bạn
+| Lệnh | Có xóa không? | `count > 0` | `count < 0` | Use case |
+|------|---------------|-------------|-------------|----------|
+| `SRANDMEMBER key` | Không | — | — | Peek random 1 member |
+| `SRANDMEMBER key 3` | Không | Tối đa 3 member **khác nhau** | — | Sampling không phá dữ liệu |
+| `SRANDMEMBER key -5` | Không | — | Chính xác 5 kết quả, **có thể lặp** | Random draw có hoàn lại |
+| `SPOP key 3` | Có | 3 member bị xóa | Không áp dụng | Lottery/job queue đơn giản |
 
 ```bash
-SINTER follow:alice follow:bob            # bạn chung
-SDIFF  follow:bob   follow:alice          # bob follow mà alice chưa → gợi ý
+SRANDMEMBER wheel 3      # rút 3 phần tử khác nhau, không xóa
+SRANDMEMBER wheel -5     # rút 5 lần, có thể trùng
+SPOP lottery 2           # rút 2 vé và xóa khỏi pool
 ```
 
-### 5.3 Filter đa điều kiện (faceted search thô)
+Random lấy ở đâu ra? Với hashtable, Redis có thể chọn bucket/entry ngẫu nhiên gần O(1), không cần shuffle cả set.
+
+> [!NOTE]
+> Random của Redis đủ tốt cho sampling, lottery nội bộ, phân phối job đơn giản. Không dùng nó làm nguồn random mật mã. Redis 6 cải thiện độ công bằng so với các phiên bản cũ, nhưng output có `count > 0` vẫn không cam kết thứ tự ngẫu nhiên hoàn hảo; client shuffle nếu UI cần.
+
+---
+
+## 8. Duyệt Set lớn: SSCAN và cursor semantics
+
+`SMEMBERS` nhìn tiện, nhưng là cái bẫy lớn nhất của Set.
+
+```bash
+SMEMBERS followers:famous
+# 10,000,000 members → Redis phải gom reply lớn, block event loop, client nhận hàng trăm MB
+```
+
+Dùng `SSCAN`:
+
+```bash
+SSCAN followers:famous 0 COUNT 1000
+# → cursor mới + batch member
+# lặp đến khi cursor trả về 0
+```
+
+Cursor semantics cần nhớ:
+
+| Tính chất | Ý nghĩa thực tế |
+|----------|------------------|
+| Cursor `0` bắt đầu và kết thúc vòng scan | Không phải offset, không dùng để “page 5” ổn định |
+| `COUNT` là hint, không phải limit cứng | Batch có thể nhiều/ít hơn |
+| Có thể trả duplicate khi key thay đổi trong lúc scan | Client nên idempotent |
+| Không snapshot | Member thêm/xóa giữa vòng scan có thể thấy hoặc không |
+| `MATCH` filter sau khi scan bucket | Không biến thành index lookup |
+
+> [!IMPORTANT]
+> Với set production không bounded rõ ràng, mặc định coi nó là big set: **không dùng `SMEMBERS` trong request path**. `SSCAN` + batch processing, hoặc thiết kế thêm index/pagination ở cấu trúc khác.
+
+---
+
+## 9. Performance notes & benchmark thực tế
+
+Các số dưới đây là benchmark minh họa trên máy dev phổ thông (Redis local, loopback, member ngắn). Đừng copy làm SLA, hãy dùng để cảm nhận bậc độ lớn.
+
+| Kịch bản | Dữ liệu | Lệnh | Kết quả điển hình | Ý nghĩa |
+|----------|---------|------|-------------------|---------|
+| Dedup event | set hashtable 1M member | `SADD seen evt_new` | ~0.05–0.2ms | Một round-trip quyết định mới/trùng |
+| Membership | set hashtable 1M member | `SISMEMBER users u42` | ~0.05–0.2ms | O(1) trung bình |
+| intset nhỏ | 512 int64 | memory payload ~4KB | — | Rẻ hơn hashtable nhiều lần |
+| Intersect nhỏ ∩ lớn | 120 ∩ 1,000,000 | `SINTER` | thường <1ms nếu result nhỏ | Drive bằng set nhỏ nhất |
+| Dump set lớn | 1M member × 16 bytes | `SMEMBERS` | có thể block hàng chục ms+ và reply hàng chục MB | Không dùng trong request path |
+| Batch scan | 1M member | `SSCAN COUNT 1000` | nhiều call nhỏ | Trải chi phí ra nhiều tick |
+
+Memory trực giác:
+
+```diagram
+512 số int64 trong intset
+  header + 512 × 8 bytes ≈ hơn 4KB payload
+
+512 string trong hashtable
+  dictEntry pointers + hash table bucket + SDS string + allocator overhead
+  → thường lớn hơn nhiều lần, đổi lại lookup O(1) cho set lớn
+```
+
+> [!CAUTION]
+> Redis single-thread cho command execution. Một command O(N) trả reply khổng lồ không chỉ chậm cho caller; nó làm các request khác xếp hàng phía sau.
+
+---
+
+## 10. Patterns thực tế
+
+### 10.1. Dedup job / event
+
+```bash
+SADD processed:2026-07-07 evt:8812     # → 1 = mới, 0 = đã xử lý
+EXPIRE processed:2026-07-07 172800 NX  # giữ 2 ngày
+```
+
+Atomic nhờ Redis command execution: hai worker cùng `SADD` một event thì chỉ một worker nhận `1`.
+
+### 10.2. Bạn chung / gợi ý kết bạn
+
+```bash
+SINTER following:alice following:bob      # follow chung
+SDIFF  following:bob   following:alice    # bob follow mà alice chưa → gợi ý
+```
+
+Nếu chỉ cần “có bạn chung không?”:
+
+```bash
+SINTERCARD 2 following:alice following:bob LIMIT 1
+```
+
+### 10.3. Filter đa điều kiện (faceted search thô)
 
 ```bash
 SADD color:red   p1 p2 p5
 SADD size:M      p2 p5 p9
 SADD brand:nike  p5 p9
 
-SINTER color:red size:M brand:nike        # → p5 (sản phẩm thỏa cả 3)
+SINTER color:red size:M brand:nike        # → p5
 ```
 
-Cần filter phức tạp hơn (range, full-text) → [RediSearch](./redis-modules.md).
+Cần range query, full-text, relevance score → dùng [RediSearch / Redis modules](./redis-modules.md), không cố nhồi mọi thứ vào Set.
 
-### 5.4 Online users
+### 10.4. Online users
 
 ```bash
-SADD online:now user:42                    # khi heartbeat
-SREM online:now user:42                    # khi disconnect
-SCARD online:now                           # đếm đang online
-SISMEMBER online:now user:7                # user cụ thể có online?
+SADD online:now user:42
+SREM online:now user:42
+SCARD online:now
+SISMEMBER online:now user:7
 ```
+
+> [!WARNING]
+> Set không có TTL per-member. Nếu heartbeat user cần tự hết hạn từng người, dùng key TTL riêng (`online:user:42`) hoặc [Sorted Set](./sorted-sets.md) với score là timestamp heartbeat.
 
 ---
 
-## 6. Case study thực tế
+## 11. Case study thực tế
 
-### 6.1 Hệ thống follow — mạng xã hội quy mô vừa
+### 11.1. Hệ thống follow — mạng xã hội quy mô vừa
 
-Bài toán: 5 triệu user, trung bình 200 follow/người; cần "A có follow B?" trong request path (render nút Follow), bạn chung, gợi ý.
+Bài toán: **5 triệu user**, trung bình **200 following/user** → khoảng 1 tỷ edge logic. Cần render nút Follow trong request path, đếm follower, tìm bạn chung.
 
 ```bash
-# Hai chiều — ghi cặp đôi trong MULTI để nhất quán:
 MULTI
 SADD following:alice bob
 SADD followers:bob alice
 EXEC
 
-SISMEMBER following:alice bob          # nút Follow/Following — O(1), ~0.1ms
-SCARD followers:bob                    # đếm follower hiển thị profile
+SISMEMBER following:alice bob          # nút Follow/Following — O(1)
+SCARD followers:bob                    # đếm follower
 SINTER following:alice following:carol # follow chung
-SDIFF  following:carol following:alice # carol follow mà alice chưa → gợi ý
+SDIFF  following:carol following:alice # gợi ý
 ```
 
-Điểm đau thực tế — **celebrity problem**: `followers:famous` có 10 triệu member là big key (SMEMBERS chết, migrate slot chậm, fan-out đắt). Hướng xử lý: đếm bằng `SCARD` (không bao giờ liệt kê toàn bộ), liệt kê phân trang bằng `SSCAN`, và cân nhắc chuyển danh sách follower của celebrity về DB — Redis chỉ giữ quan hệ chiều `following:` (bị chặn trên ~5K).
+Celebrity problem:
 
-### 6.2 Dedup consumer — pipeline xử lý webhook
+```diagram
+followers:normal_user  ≈ 200 members
+followers:celebrity    ≈ 10,000,000 members
 
-Bài toán: đối tác gửi webhook **at-least-once** (có retry) → cùng event ID đến 2–3 lần; xử lý trùng gây ghi sổ kép.
+SCARD followers:celebrity      ✅ O(1)
+SSCAN followers:celebrity      ✅ batch được
+SMEMBERS followers:celebrity   ❌ big reply + block + migrate slot chậm
+```
+
+Hướng xử lý thực tế:
+
+- Không bao giờ liệt kê toàn bộ follower celebrity trong request path
+- Dùng `SSCAN` cho batch job/offline export
+- Cân nhắc chỉ giữ chiều `following:{user}` trong Redis; follower list dài để DB/search system xử lý pagination
+- Với cluster, key cần set-op theo user nên dùng hash tag nhất quán, xem [cluster](./cluster.md)
+
+### 11.2. Dedup consumer — pipeline xử lý webhook
+
+Bài toán: partner gửi webhook **at-least-once**. Cùng event đến 2–3 lần; duplicate có thể gây ghi sổ kép.
 
 ```bash
-# Đầu handler — một lệnh quyết định tất cả:
 SADD seen:webhook:2026-07-07 evt_8Kj2m
-# → 1: lần đầu → xử lý
-# → 0: đã thấy → trả 200 OK ngay, không xử lý
-EXPIRE seen:webhook:2026-07-07 259200 NX     # giữ 3 ngày (> cửa sổ retry của đối tác)
+# 1: lần đầu → xử lý
+# 0: đã thấy → trả 200 OK ngay
+EXPIRE seen:webhook:2026-07-07 259200 NX     # 3 ngày > retry window
 ```
 
-Vì sao không dùng DB unique constraint? Được, nhưng check Redis ~0.1ms chặn được 99% bản trùng trước khi chạm DB; constraint vẫn giữ làm lưới cuối (Redis restart mất vài giây dữ liệu seen → vài bản trùng lọt xuống, constraint bắt nốt). Hai lớp — Redis cho tốc độ, DB cho đảm bảo.
+Vì sao vẫn giữ DB unique constraint? Vì Redis là lớp chặn nhanh, DB là lưới an toàn cuối cùng. Nếu Redis restart mất vài giây dữ liệu chưa persist, duplicate hiếm có thể lọt xuống; constraint bắt nốt.
 
-Key theo ngày thay vì một set vĩnh viễn: memory bounded và khớp cửa sổ retry — set "seen" vĩnh viễn là memory leak.
+> [!TIP]
+> Key theo ngày + TTL làm memory bounded. Một set `seen:webhook:forever` nghe đơn giản nhưng là memory leak chậm rãi.
 
-### 6.3 Feature flag rollout theo tập user
+### 11.3. Feature flag rollout theo tập user
 
-Bài toán: bật tính năng mới cho beta tester + 5% user, tắt/bật tức thì không deploy.
+Bài toán: bật tính năng mới cho beta tester + override, tắt/bật tức thì không deploy.
 
 ```bash
-SADD ff:new-checkout:users 42 88 1024        # beta tester chỉ định
-SISMEMBER ff:new-checkout:users $uid         # check mỗi request — O(1)
+SADD ff:new-checkout:users 42 88 1024
+SISMEMBER ff:new-checkout:users $uid
 
-# 5% ngẫu nhiên bền vững: không cần set — hash(uid) % 100 < 5 phía app;
-# Set dành cho danh sách chỉ định đích danh + override (blacklist khỏi experiment):
+# 5% rollout bền vững thường làm phía app:
+# hash(uid) % 100 < 5
+# Set dành cho include/exclude đích danh
 SADD ff:new-checkout:excluded 555
 ```
 
-Dùng kèm local cache 5–30s phía app (flag đổi không cần hiệu lực từng mili giây) — giảm 99% lượt gọi Redis; mẫu hoàn chỉnh với invalidation tại [Client-side Caching](./client-side-caching.md).
+Dùng kèm local cache 5–30s phía app để giảm Redis QPS; invalidation và cache coherence xem [Client-side Caching](./client-side-caching.md).
 
 ---
 
-## 7. Best Practices
+## 12. Anti-patterns cần tránh
 
-- **SSCAN thay cho SMEMBERS** với set không rõ size — mặc định coi set production là lớn
-- **Tận dụng return value của SADD** (số phần tử mới) để làm dedup check — không cần SISMEMBER trước (2 round-trip + race)
-- **Set toàn số nguyên rất rẻ** (intset) — thiết kế member là numeric id thay vì string dài khi có thể
-- **`SINTERCARD` với `LIMIT`** khi chỉ cần biết "có ít nhất K phần tử chung không" — dừng sớm, không tính hết
-- **Kết quả set-op lớn → `*STORE`** rồi đọc dần, kèm `EXPIRE` cho key kết quả
-- **Set không có TTL per-member** — muốn "member tự hết hạn" thì dùng [Sorted Set](./sorted-sets.md) với score = timestamp rồi dọn bằng `ZREMRANGEBYSCORE`
+| ❌ Anti-pattern | Vì sao hỏng | ✅ Cách đúng |
+|----------------|-------------|-------------|
+| `SMEMBERS` trên set unbounded | Block Redis + reply khổng lồ | `SSCAN`, `*STORE` + scan, hoặc thiết kế pagination khác |
+| `SISMEMBER` trước `SADD` để dedup | 2 round-trip, race logic | Dùng return value của `SADD` |
+| `SUNION` nhiều giant set trả về client | Output buffer phình, network nghẽn | `SUNIONSTORE` key tạm + `EXPIRE` + `SSCAN` |
+| Một set `seen` vĩnh viễn | Memory leak theo thời gian | Key theo ngày/tenant + TTL |
+| Dùng Set khi cần TTL từng member | Set chỉ TTL cả key | [Sorted Set](./sorted-sets.md) score=expire_at |
+| Dùng Set để đếm 100M unique/day | Chính xác nhưng memory lớn | [HyperLogLog](./bitmaps-hyperloglog.md) nếu chấp nhận sai số |
+| Set-op cross-slot trong cluster | `CROSSSLOT` | Hash tag `{tenant}`/`{user}` |
+| Lưu member string rất dài khi chỉ cần ID | Tốn memory, listpack dễ convert | Lưu numeric/string ID ngắn, metadata ở DB/hash khác |
+
+> [!WARNING]
+> Anti-pattern nguy hiểm nhất thường không xuất hiện ở staging: staging có 1.000 member nên `SMEMBERS` “nhanh”. Production có 10 triệu member và cùng dòng code đó trở thành incident.
+
+---
+
+## 13. Best Practices
+
+- **Dùng return value của `SADD`/`SREM`** làm tín hiệu changed; giảm round-trip và tránh race.
+- **Bound key theo thời gian** cho dedup: `seen:webhook:YYYY-MM-DD` + `EXPIRE`.
+- **Không `SMEMBERS` set không rõ size**; dùng `SSCAN` hoặc `SCARD` trước khi quyết định.
+- **Thiết kế member ngắn**: numeric ID giúp `intset` tiết kiệm memory khi set nhỏ và giảm SDS overhead khi hashtable.
+- **Dùng `SINTERCARD LIMIT`** cho câu hỏi threshold (“có ít nhất K phần tử chung?”).
+- **Dùng `*STORE` cho kết quả lớn**, nhớ `EXPIRE` key tạm.
+- **Trong Cluster, thiết kế hash tag từ đầu** nếu các key sẽ tham gia set-op.
+- **Đừng ép Set làm search engine**; filter phức tạp/range/full-text nên chuyển sang [Redis modules](./redis-modules.md) hoặc search system chuyên dụng.
+
+---
+
+## 14. Tóm tắt — cheat-sheet & 3 nguyên tắc
+
+Cheat-sheet chọn cấu trúc cho uniqueness/membership:
+
+| Nếu câu hỏi là... | Chọn | Lệnh chính |
+|-------------------|------|------------|
+| “Đã xử lý event này chưa?” | Set | `SADD` đọc return value |
+| “User có trong allowlist không?” | Set | `SISMEMBER` / `SMISMEMBER` |
+| “Hai nhóm có giao nhau ít nhất K không?” | Set | `SINTERCARD ... LIMIT K` |
+| “Lấy danh sách member lớn theo batch?” | Set | `SSCAN` |
+| “Member cần tự hết hạn theo thời gian?” | Sorted Set | `ZADD score=expire_at`, `ZREMRANGEBYSCORE` |
+| “Chỉ cần đếm unique cực lớn?” | HyperLogLog | `PFADD`, `PFCOUNT` |
+| “User ID dense, cần membership siêu rẻ?” | Bitmap | `SETBIT`, `GETBIT`, `BITCOUNT` |
+
+3 nguyên tắc nhớ lâu:
+
+1. **Hỏi membership thì để Redis trả lời bằng một lệnh** — `SADD`/`SISMEMBER`, đừng kéo dữ liệu về app.
+2. **Set-op nhanh khi input nhỏ, nguy hiểm khi output lớn** — đặc biệt `SUNION`/`SMEMBERS`.
+3. **Set không có thời gian và thứ tự** — cần score, range, TTL per-member thì chuyển sang Sorted Set.
+
+Khi incident 03:17 sáng quay lại, một dòng `SADD` đúng chỗ có thể là khác biệt giữa retry storm 2 triệu event và một hệ thống bình thản trả `0` cho duplicate.
 
 ---
 
 ## Tài liệu tham khảo
 
 - [Redis Sets](https://redis.io/docs/latest/develop/data-types/sets/)
+- [SADD](https://redis.io/docs/latest/commands/sadd/)
+- [SINTER](https://redis.io/docs/latest/commands/sinter/)
 - [SINTERCARD](https://redis.io/docs/latest/commands/sintercard/)
-- [Sorted Sets](./sorted-sets.md) — khi cần thứ tự và score
+- [SRANDMEMBER](https://redis.io/docs/latest/commands/srandmember/)
+- [Redis memory optimization](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/memory-optimization/)
+- [Sorted Sets](./sorted-sets.md) — khi cần thứ tự, score, TTL per-member
 - [Bitmaps & HyperLogLog](./bitmaps-hyperloglog.md) — đếm unique tiết kiệm memory
+- [Redis Cluster](./cluster.md) — hash slot và hash tag cho multi-key command
