@@ -10,7 +10,8 @@
 - [4. PEL, XACK và recovery — at-least-once](#4-pel-xack-và-recovery--at-least-once)
 - [5. Quản lý kích thước stream](#5-quản-lý-kích-thước-stream)
 - [6. So sánh: Stream vs Pub/Sub vs List vs Kafka](#6-so-sánh-stream-vs-pubsub-vs-list-vs-kafka)
-- [7. Best Practices](#7-best-practices)
+- [7. Case study thực tế](#7-case-study-thực-tế)
+- [8. Best Practices](#8-best-practices)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -208,7 +209,65 @@ Dấu `~` (approximate) quan trọng: cho phép server chỉ cắt khi **cả no
 
 ---
 
-## 7. Best Practices
+## 7. Case study thực tế
+
+### 7.1 Order pipeline — e-commerce microservices
+
+Bài toán: sau khi đặt hàng, 4 service phải phản ứng (thanh toán, kho, email, analytics); mỗi service **không được mất event** kể cả khi đang deploy/restart — lý do Pub/Sub bị loại ngay từ đầu.
+
+```bash
+# Order service ghi 1 lần:
+XADD orders '*' event created order_id 8812 amount 250000 uid 42
+
+# Mỗi service một consumer group — đọc độc lập, đọc lại từ đầu được:
+XGROUP CREATE orders g:payment  0
+XGROUP CREATE orders g:stock    0
+XGROUP CREATE orders g:email    0
+XGROUP CREATE orders g:analytics 0
+
+# Payment service, 3 instance chia tải trong cùng group:
+XREADGROUP GROUP g:payment pay-1 COUNT 10 BLOCK 5000 STREAMS orders '>'
+# ... xử lý xong từng entry:
+XACK orders g:payment 1783400000123-0
+```
+
+Điểm đáng chú ý:
+- **Fan-out + chia tải cùng lúc**: giữa các group là fan-out (mọi group đều nhận đủ event), trong một group là chia tải — đúng mô hình topic + consumer group của Kafka ở quy mô nhỏ
+- Service mới ra đời sau 6 tháng? `XGROUP CREATE orders g:fraud 0` — đọc lại toàn bộ lịch sử còn trong stream, không cần order service biết gì
+- Deploy/restart: entry đang xử lý dở nằm trong PEL, instance mới `XAUTOCLAIM ... min-idle 60000` nhặt lại — không mất đơn nào
+- Giới hạn phải biết: `XTRIM orders MAXLEN ~ 10000000` — stream không phải kho lưu trữ vĩnh viễn; analytics cần giữ lâu thì đổ tiếp về warehouse
+
+### 7.2 IoT telemetry ingest — buffer trước time-series DB
+
+Bài toán: 50K thiết bị gửi metric mỗi 10s (~5K msg/s), ghi thẳng vào TimescaleDB từng dòng thì nghẽn; cần buffer hấp thụ burst + batch insert.
+
+```bash
+# Gateway nhận MQTT → ghi stream, MAXLEN chặn memory khi DB chậm:
+XADD telemetry MAXLEN ~ 1000000 '*' dev d-4471 temp 27.4 hum 61
+
+# 4 writer cùng group, mỗi lần lấy cả lô:
+XREADGROUP GROUP g:tsdb w-1 COUNT 500 BLOCK 2000 STREAMS telemetry '>'
+# → 1 INSERT 500 rows → XACK 500 ID trong 1 lệnh (variadic)
+```
+
+Vì sao Stream mà không phải List ở đây: cần đọc-rồi-ACK (writer crash giữa batch không mất 500 metric), và dashboard realtime có thể đọc **cùng dữ liệu** bằng group thứ hai mà không giành giật với writer. `MAXLEN ~` là van an toàn: DB chết 1 giờ thì mất metric cũ nhất thay vì OOM cả Redis — trade-off chủ động chọn trước.
+
+### 7.3 Audit log / activity feed nội bộ
+
+Bài toán: ghi lại mọi thao tác admin (ai, làm gì, lúc nào), truy vấn theo khoảng thời gian để điều tra.
+
+```bash
+XADD audit '*' actor admin:7 action "refund" target order:8812 ip 10.0.3.4
+
+# Điều tra: chuyện gì xảy ra 14:00–14:30 ngày 2026-07-05?
+XRANGE audit 1783605600000 1783607400000
+```
+
+Entry ID chính là timestamp → **stream tự là index thời gian**, không cần secondary index. Đây là điều List không làm được (chỉ index theo vị trí) và là lý do chọn Stream dù không cần consumer group: XRANGE theo thời gian + XLEN + delta-compression tự nhiên của listpack làm audit log gọn và tra cứu nhanh.
+
+---
+
+## 8. Best Practices
 
 - **Luôn XADD với `MAXLEN ~`** — stream không cắt là memory leak có tổ chức
 - **Worker idempotent + janitor XAUTOCLAIM định kỳ** — đây là 2 mảnh bắt buộc của reliable processing, thiếu 1 là mất hoặc kẹt message

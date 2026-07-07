@@ -9,7 +9,8 @@
 - [3. Score, tie-breaking và range queries](#3-score-tie-breaking-và-range-queries)
 - [4. Leaderboard hoạt động thế nào](#4-leaderboard-hoạt-động-thế-nào)
 - [5. Patterns: delayed queue, sliding window, time-index](#5-patterns-delayed-queue-sliding-window-time-index)
-- [6. Best Practices](#6-best-practices)
+- [6. Case study thực tế](#6-case-study-thực-tế)
+- [7. Best Practices](#7-best-practices)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -189,7 +190,61 @@ ZREMRANGEBYSCORE user:42:orders -inf <90_days_ago> # dọn dữ liệu cũ
 
 ---
 
-## 6. Best Practices
+## 6. Case study thực tế
+
+### 6.1 Leaderboard game mobile — hàng chục triệu người chơi
+
+Bài toán: leaderboard mùa giải (reset mỗi tháng), 30 triệu người chơi, mỗi trận cộng điểm; cần rank của tôi + top 100 + "những người quanh tôi".
+
+```bash
+# Kết thúc trận:
+ZINCRBY lb:s27 35 player:88420
+
+# Ba màn hình chính, mỗi màn 1-2 lệnh:
+ZREVRANGE lb:s27 0 99 WITHSCORES              # top 100
+ZREVRANK  lb:s27 player:88420                 # rank của tôi — O(log N)
+rank = ZREVRANK(...); ZREVRANGE lb:s27 rank-5 rank+5 WITHSCORES   # quanh tôi
+```
+
+Quyết định thiết kế:
+- **Key theo mùa** (`lb:s27`) — reset = tạo key mới, key cũ giữ làm lịch sử rồi EXPIRE 90 ngày; không bao giờ phải DEL 30 triệu member
+- **Tie-breaking công bằng**: score = điểm thật × 2³⁰ + (2³⁰ − timestampđạtđược) — cùng điểm thì ai đạt trước xếp trên, thay vì thứ tự alphabet mặc định
+- ZSet 30 triệu member ≈ 3-4GB — một key không shard được trong [Cluster](./cluster.md); nếu vượt, chia leaderboard theo region/league (vốn cũng là yêu cầu sản phẩm)
+- Đây là kiến trúc leaderboard của hầu hết game studio dùng Redis; DB chỉ lưu snapshot cuối mùa để trao thưởng
+
+### 6.2 Delayed job scheduler — nhắc hẹn & retry
+
+Bài toán: "gửi push sau 30 phút", "retry webhook sau 1/5/25 phút" — hàng triệu job hẹn giờ, không dùng cron per-job được.
+
+```bash
+# Score = timestamp đến hạn:
+ZADD delayed 1783401800 '{"type":"push","uid":42}'
+
+# Poller mỗi giây — lấy-và-xóa atomic (7.0+), không lo 2 poller lấy trùng:
+ZMPOP 1 delayed MIN COUNT 100
+# kiểm tra score ≤ now thì xử lý; phần tử chưa đến hạn → ZADD trả lại
+# (hoặc chuẩn hơn: Lua script ZRANGEBYSCORE 0 now + ZREM trong 1 script)
+```
+
+Đây chính là cơ chế delayed job của Sidekiq/Bull: List làm queue chính, **ZSet làm phòng chờ theo thời gian**, poller chuyển job đến hạn từ ZSet sang List. Retry backoff = ZADD lại với score lùi xa dần.
+
+### 6.3 Sliding-window rate limiter — API gateway
+
+Bài toán: 100 request/60s **trượt thật** (không phải cửa sổ nhảy của INCR+EXPIRE vốn cho phép burst 200 quanh ranh giới phút).
+
+```bash
+# Mỗi request — gói trong MULTI hoặc Lua:
+ZREMRANGEBYSCORE rl:user:42 0 (now-60000)     # dọn request ra khỏi cửa sổ
+ZADD rl:user:42 now-ms req-uuid
+ZCARD rl:user:42                              # > 100 → 429
+EXPIRE rl:user:42 61
+```
+
+Trade-off so với INCR cửa sổ cố định: chính xác hơn nhưng tốn memory O(limit)/user và 4 lệnh/request — gateway lớn thường dùng INCR cho tầng thô + ZSet cho endpoint nhạy cảm (login, OTP). So sánh đầy đủ các thuật toán tại [Rate Limiting](./rate-limiting.md).
+
+---
+
+## 7. Best Practices
 
 - **Member nhỏ, dữ liệu lớn để chỗ khác**: ZSet lưu `order:9911` (id), body đơn hàng nằm ở [Hash](./hashes.md)/String — member xuất hiện trong cả dict lẫn skiplist nên member dài tốn gấp đôi
 - **Dọn định kỳ bằng `ZREMRANGEBYSCORE`/`BYRANK`** — ZSet time-index chỉ ghi không dọn là memory leak

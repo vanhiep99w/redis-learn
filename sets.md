@@ -9,7 +9,8 @@
 - [3. Set algebra — UNION / INTER / DIFF hoạt động thế nào](#3-set-algebra--union--inter--diff-hoạt-động-thế-nào)
 - [4. Random members — SRANDMEMBER & SPOP](#4-random-members--srandmember--spop)
 - [5. Patterns thực tế](#5-patterns-thực-tế)
-- [6. Best Practices](#6-best-practices)
+- [6. Case study thực tế](#6-case-study-thực-tế)
+- [7. Best Practices](#7-best-practices)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -181,7 +182,61 @@ SISMEMBER online:now user:7                # user cụ thể có online?
 
 ---
 
-## 6. Best Practices
+## 6. Case study thực tế
+
+### 6.1 Hệ thống follow — mạng xã hội quy mô vừa
+
+Bài toán: 5 triệu user, trung bình 200 follow/người; cần "A có follow B?" trong request path (render nút Follow), bạn chung, gợi ý.
+
+```bash
+# Hai chiều — ghi cặp đôi trong MULTI để nhất quán:
+MULTI
+SADD following:alice bob
+SADD followers:bob alice
+EXEC
+
+SISMEMBER following:alice bob          # nút Follow/Following — O(1), ~0.1ms
+SCARD followers:bob                    # đếm follower hiển thị profile
+SINTER following:alice following:carol # follow chung
+SDIFF  following:carol following:alice # carol follow mà alice chưa → gợi ý
+```
+
+Điểm đau thực tế — **celebrity problem**: `followers:famous` có 10 triệu member là big key (SMEMBERS chết, migrate slot chậm, fan-out đắt). Hướng xử lý: đếm bằng `SCARD` (không bao giờ liệt kê toàn bộ), liệt kê phân trang bằng `SSCAN`, và cân nhắc chuyển danh sách follower của celebrity về DB — Redis chỉ giữ quan hệ chiều `following:` (bị chặn trên ~5K).
+
+### 6.2 Dedup consumer — pipeline xử lý webhook
+
+Bài toán: đối tác gửi webhook **at-least-once** (có retry) → cùng event ID đến 2–3 lần; xử lý trùng gây ghi sổ kép.
+
+```bash
+# Đầu handler — một lệnh quyết định tất cả:
+SADD seen:webhook:2026-07-07 evt_8Kj2m
+# → 1: lần đầu → xử lý
+# → 0: đã thấy → trả 200 OK ngay, không xử lý
+EXPIRE seen:webhook:2026-07-07 259200 NX     # giữ 3 ngày (> cửa sổ retry của đối tác)
+```
+
+Vì sao không dùng DB unique constraint? Được, nhưng check Redis ~0.1ms chặn được 99% bản trùng trước khi chạm DB; constraint vẫn giữ làm lưới cuối (Redis restart mất vài giây dữ liệu seen → vài bản trùng lọt xuống, constraint bắt nốt). Hai lớp — Redis cho tốc độ, DB cho đảm bảo.
+
+Key theo ngày thay vì một set vĩnh viễn: memory bounded và khớp cửa sổ retry — set "seen" vĩnh viễn là memory leak.
+
+### 6.3 Feature flag rollout theo tập user
+
+Bài toán: bật tính năng mới cho beta tester + 5% user, tắt/bật tức thì không deploy.
+
+```bash
+SADD ff:new-checkout:users 42 88 1024        # beta tester chỉ định
+SISMEMBER ff:new-checkout:users $uid         # check mỗi request — O(1)
+
+# 5% ngẫu nhiên bền vững: không cần set — hash(uid) % 100 < 5 phía app;
+# Set dành cho danh sách chỉ định đích danh + override (blacklist khỏi experiment):
+SADD ff:new-checkout:excluded 555
+```
+
+Dùng kèm local cache 5–30s phía app (flag đổi không cần hiệu lực từng mili giây) — giảm 99% lượt gọi Redis; mẫu hoàn chỉnh với invalidation tại [Client-side Caching](./client-side-caching.md).
+
+---
+
+## 7. Best Practices
 
 - **SSCAN thay cho SMEMBERS** với set không rõ size — mặc định coi set production là lớn
 - **Tận dụng return value của SADD** (số phần tử mới) để làm dedup check — không cần SISMEMBER trước (2 round-trip + race)

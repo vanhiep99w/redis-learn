@@ -10,7 +10,8 @@
 - [4. HyperLogLog hoạt động thế nào](#4-hyperloglog-hoạt-động-thế-nào)
 - [5. HLL commands & patterns](#5-hll-commands--patterns)
 - [6. Chọn công cụ đếm: Set vs Bitmap vs HLL](#6-chọn-công-cụ-đếm-set-vs-bitmap-vs-hll)
-- [7. Best Practices](#7-best-practices)
+- [7. Case study thực tế](#7-case-study-thực-tế)
+- [8. Best Practices](#8-best-practices)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -216,7 +217,59 @@ Chỉ cần con số unique, chấp nhận ~1% sai?   ── Có ─▶ HLL (12K
 
 ---
 
-## 7. Best Practices
+## 7. Case study thực tế
+
+### 7.1 Bảng điểm danh & streak — app học tập (kiểu Duolingo)
+
+Bài toán: hiển thị lịch hoạt động 365 ngày + chuỗi ngày liên tiếp (streak) cho từng user; 20 triệu user.
+
+```bash
+# Mỗi user một bitmap theo năm, bit = ngày trong năm (0..364):
+SETBIT streak:42:2026 187 1              # hôm nay là day-of-year 187
+
+BITCOUNT streak:42:2026                  # số ngày học trong năm
+GETBIT streak:42:2026 186                # hôm qua có học không?
+GET streak:42:2026                       # lấy cả 46 bytes về app tính streak/vẽ lịch
+```
+
+Điểm hay: bitmap 365 bit = **46 bytes**/user/năm — 20 triệu user ≈ 1GB, và render lịch năm chỉ cần 1 lệnh GET rồi đọc bit phía client thay vì 365 lệnh GETBIT. Đây là trường hợp per-user bitmap (khác mẫu DAU per-day bitmap ở mục 2 — cùng công cụ, hai chiều key ngược nhau, chọn theo câu hỏi cần trả lời).
+
+### 7.2 Funnel & retention dashboard — growth team
+
+Bài toán: "trong những người caì app tuần 1, bao nhiêu % còn active tuần 2/3/4?" — cổ điển là query warehouse chạy hàng phút; muốn xem realtime.
+
+```bash
+# Ghi nhận theo tuần (bit = user id):
+SETBIT cohort:install:w27 91234 1        # cài đặt tuần 27
+SETBIT active:w28 91234 1                # active tuần 28
+
+# Retention tuần 1: cài w27 ∩ active w28
+BITOP AND tmp:ret:w27:1 cohort:install:w27 active:w28
+BITCOUNT tmp:ret:w27:1                   # ÷ BITCOUNT cohort:install:w27 = %
+EXPIRE tmp:ret:w27:1 3600
+```
+
+Toàn bộ ma trận retention 8 tuần = vài chục lệnh BITOP trên bitmap vài MB — chạy dưới 100ms. Đây là thế mạnh độc quyền của Bitmap: **phép giao giữa các cohort** — thứ HLL không làm được (chỉ union) và Set làm được nhưng tốn gấp ~400 lần memory.
+
+### 7.3 Unique visitors realtime — hệ thống analytics nhúng
+
+Bài toán: cung cấp widget "unique visitors hôm nay/7 ngày/30 ngày" cho 50K website khách hàng; visitor định danh bằng cookie UUID (không phải số compact → bitmap bị loại).
+
+```bash
+# Mỗi pageview:
+PFADD uv:site881:2026-07-07 "c-550e8400-..."
+
+# Widget — 3 con số, mỗi con số 1 lệnh:
+PFCOUNT uv:site881:2026-07-07
+PFCOUNT uv:site881:2026-07-01 ... uv:site881:2026-07-07      # union 7 ngày
+PFMERGE uv:site881:m:2026-07 uv:site881:2026-07-07           # gộp dần key tháng
+```
+
+Bài toán memory quyết định tất cả: 50K site × 30 ngày × 12KB ≈ 18GB? Không — đa số site nhỏ nằm ở **sparse encoding** vài trăm byte, thực tế ~1-2GB. Nếu dùng Set: site lớn 1 triệu visitor/ngày × UUID 36 byte → riêng một site đã ~60MB/ngày. Sai số 0.81% hoàn toàn chấp nhận được cho widget analytics — và khách không bao giờ hỏi "visitor thứ 999.881 là ai".
+
+---
+
+## 8. Best Practices
 
 - **Bitmap: kiểm soát id trước khi dùng** — id phải compact; nếu id nội bộ là UUID, tạo mapping UUID → số tự tăng, hoặc bỏ Bitmap
 - **Key theo chu kỳ + TTL**: `active:2026-07-07` với `EXPIRE 90 ngày` — cả Bitmap lẫn HLL đều nên có vòng đời rõ

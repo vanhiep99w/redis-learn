@@ -9,7 +9,8 @@
 - [3. Hash vs String (JSON) — chọn cái nào?](#3-hash-vs-string-json--chọn-cái-nào)
 - [4. Field-level TTL (Redis 7.4+)](#4-field-level-ttl-redis-74)
 - [5. Patterns thực tế](#5-patterns-thực-tế)
-- [6. Best Practices](#6-best-practices)
+- [6. Case study thực tế](#6-case-study-thực-tế)
+- [7. Best Practices](#7-best-practices)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -194,7 +195,61 @@ EXPIRE rl:user42:min:202607070049 120 NX
 
 ---
 
-## 6. Best Practices
+## 6. Case study thực tế
+
+### 6.1 Session store — web app nhiều instance
+
+Bài toán: app scale ngang 20 instance sau load balancer — session in-memory không dùng được nữa; mỗi request đọc session, một số request ghi 1-2 field.
+
+```bash
+# Login:
+HSET sess:tok_9f2a uid 42 role admin cart_id c-881 last_seen 1783400000
+EXPIRE sess:tok_9f2a 1800
+
+# Mỗi request — đọc đúng field cần, không parse JSON:
+HMGET sess:tok_9f2a uid role
+
+# Gia hạn trượt + cập nhật 1 field, không đọc-sửa-ghi cả object:
+HSET sess:tok_9f2a last_seen 1783400100
+EXPIRE sess:tok_9f2a 1800
+```
+
+Vì sao Hash thắng String-JSON ở đây: hai request song song cùng ghi session (tab A đổi cart, tab B đổi last_seen) — với JSON là race read-modify-write mất dữ liệu, với Hash là 2 lệnh HSET độc lập không đụng nhau. Session 5-10 field nằm gọn listpack → memory nhỏ hơn cả chuỗi JSON tương đương.
+
+### 6.2 Giỏ hàng e-commerce
+
+Bài toán: giỏ hàng thay đổi liên tục (thêm/bớt/đổi số lượng), phải sống qua login/logout, DB ghi mỗi click là quá tải.
+
+```bash
+# field = product_id, value = quantity:
+HSET cart:user:42 sku:1001 2 sku:2005 1
+HINCRBY cart:user:42 sku:1001 1        # bấm "+" — atomic, 2 tab không giẫm nhau
+HDEL cart:user:42 sku:2005             # bỏ khỏi giỏ
+HGETALL cart:user:42                   # trang checkout — giỏ < vài trăm item, an toàn
+EXPIRE cart:user:42 604800             # giỏ bỏ quên tự dọn sau 7 ngày
+```
+
+Chi tiết hay bị bỏ sót: `HINCRBY` về 0 **không tự xóa field** — app phải HDEL khi quantity ≤ 0, không thì giỏ hiển thị "0 cái áo". Giá sản phẩm **không** lưu trong giỏ (giá đổi thì giỏ sai) — checkout join với bảng giá hiện hành.
+
+### 6.3 Realtime metrics per-entity — dashboard quảng cáo
+
+Bài toán: mỗi campaign cần counters impressions/clicks/spend cập nhật realtime, hàng nghhìn campaign, DB aggregate chạy theo giờ.
+
+```bash
+# Mỗi event — 1 lệnh, không đọc trước:
+HINCRBY stats:camp:881:2026-07-07 impressions 1
+HINCRBY stats:camp:881:2026-07-07 clicks 1
+HINCRBYFLOAT stats:camp:881:2026-07-07 spend 0.35
+
+# Dashboard — 1 lệnh lấy cả bộ số:
+HGETALL stats:camp:881:2026-07-07
+```
+
+So với mỗi metric một String key (`stats:camp:881:impressions`, ...): Hash gom nhóm đọc 1 lệnh thay vì MGET nhiều key, đỡ rác namespace, và toàn bộ counters của campaign nằm 1 listpack. Key theo ngày → flush về warehouse rồi EXPIRE, memory bounded.
+
+---
+
+## 7. Best Practices
 
 - **Field cần thiết → HMGET, đừng HGETALL theo quán tính** — nhất là khi hash có field to (blob, JSON con)
 - **Giữ hash dưới ngưỡng listpack** khi có hàng triệu hash nhỏ — kiểm tra `OBJECT ENCODING`, chỉnh ngưỡng theo dữ liệu thật

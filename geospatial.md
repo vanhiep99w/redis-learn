@@ -9,7 +9,8 @@
 - [3. GEOSEARCH hoạt động thế nào](#3-geosearch-hoạt-động-thế-nào)
 - [4. Patterns thực tế](#4-patterns-thực-tế)
 - [5. Giới hạn & khi nào cần công cụ khác](#5-giới-hạn--khi-nào-cần-công-cụ-khác)
-- [6. Best Practices](#6-best-practices)
+- [6. Case study thực tế](#6-case-study-thực-tế)
+- [7. Best Practices](#7-best-practices)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -177,7 +178,60 @@ Geo set chỉ giữ **id + vị trí**; thuộc tính (tên, giờ mở cửa) n
 
 ---
 
-## 6. Best Practices
+## 6. Case study thực tế
+
+### 6.1 Food delivery — match đơn với shipper
+
+Bài toán: 30K shipper online toàn quốc, 500 đơn mới/phút giờ cao điểm; mỗi đơn cần danh sách shipper gần quán trong < 50ms để chạy thuật toán gán đơn.
+
+```bash
+# App shipper ping vị trí mỗi 10s — pipeline 2 lệnh:
+GEOADD ship:{hcm}:online 106.6297 10.8231 "s:88"
+SET    ship:{hcm}:hb:s:88 1 EX 30            # heartbeat — geo không có per-member TTL
+
+# Có đơn mới tại quán X:
+GEOSEARCH ship:{hcm}:online FROMLONLAT 106.652 10.795 BYRADIUS 2 km ASC COUNT 20 WITHDIST
+# → 20 candidate gần nhất + khoảng cách → service gán đơn lọc tiếp
+#   (đang giao đơn khác? rating? hướng di chuyển?) phía app
+
+# Janitor 30s/lần: ZSCAN geo set, member nào mất heartbeat → ZREM
+```
+
+Bài học từ thiết kế này: Redis chỉ trả lời "**ai ở gần**" — nhanh và rẻ; toàn bộ business logic gán đơn nằm ngoài. Key shard theo thành phố (hash tag `{hcm}` để cùng slot với key heartbeat trong [Cluster](./cluster.md)), bán kính mở rộng dần 2→5→10km nếu chưa đủ candidate — không bao giờ quét toàn quốc.
+
+### 6.2 "Cửa hàng gần bạn" — chuỗi bán lẻ
+
+Bài toán: 2000 cửa hàng, trang web/app cần "10 cửa hàng gần nhất + giờ mở cửa + tồn kho sản phẩm đang xem".
+
+```bash
+# Dữ liệu tĩnh, nạp lúc deploy:
+GEOADD stores 106.700 10.776 "st:hcm-01" 105.854 21.028 "st:hn-01" ...
+
+# Request:
+GEOSEARCH stores FROMLONLAT $lon $lat BYRADIUS 10 km ASC COUNT 10 WITHDIST
+# → [st:hcm-01 (0.8km), st:hcm-05 (2.3km), ...]
+HGETALL store:st:hcm-01                       # tên, giờ mở, phone — từ Hash
+SISMEMBER stock:sku:1001 st:hcm-01            # có hàng không — từ Set
+```
+
+Mẫu kết hợp 3 structure rất điển hình: **geo trả id theo khoảng cách, [Hash](./hashes.md) giữ thuộc tính, [Set](./sets.md) giữ quan hệ tồn kho** — mỗi cái làm đúng việc của nó. Với 2000 điểm tĩnh, mọi truy vấn < 1ms; còn "lọc theo tồn kho ngay trong truy vấn geo" → lúc đó mới cần đến RediSearch hoặc DB.
+
+### 6.3 Ride-sharing surge map — đếm mật độ theo ô
+
+Bài toán: tính hệ số surge theo khu vực = tỉ lệ (khách đang chờ / tài xế rảnh) trong từng ô lưới ~1km.
+
+```bash
+# Cách 1 — thuần geo: đếm quanh tâm ô bằng GEOSEARCH... COUNT chỉ để đếm → đắt khi gọi cho hàng nghìn ô
+# Cách 2 — tận dụng bản chất ZSet của geo: mỗi ô geohash-6 là MỘT KHOẢNG SCORE LIÊN TỤC
+ZRANGEBYSCORE drivers:{hcm} $min_score_ô $max_score_ô        # đếm tài xế trong ô — 1 range scan
+# (tính min/max score của ô geohash phía app — công thức interleave mục 1.1)
+```
+
+Case này minh họa vì sao hiểu internals đáng tiền: biết geo = ZSet + geohash prefix → mở ra cách đếm theo ô bằng range query rẻ thay vì lạm dụng GEOSEARCH. Thực tế nhiều hệ thống surge (như mô tả công khai của Uber/Grab) dùng chính lưới hexagon/geohash để aggregate mật độ như vậy.
+
+---
+
+## 7. Best Practices
 
 - **Thứ tự tham số là (longitude, latitude)** — ngược với thói quen "lat, lon" của Google Maps; lỗi số 1 của người mới, và GEOADD chỉ báo lỗi khi giá trị vượt dải hợp lệ
 - **Bán kính tìm kiếm nhỏ nhất có thể** — mở rộng dần (1km → 3km → 10km) thay vì quét 50km ngay từ đầu
