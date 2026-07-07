@@ -1,0 +1,26 @@
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
+
+# Astro
+node_modules/
+dist/
+.astro/
+src/content/docs/
+
+# Wrangler
+.wrangler/
+
+# Python
+__pycache__/
+content/
+.next/
+.source/
+public/diagrams/
+
+.superpowers/
+.pi/
+
+# Devin local config (user-specific permissions)
+.devin/*.local.json
