@@ -46,16 +46,16 @@ Doc này trả lời các câu hỏi cốt lõi: vì sao `LPUSH`/`RPOP` là O(1)
 Redis List là một chuỗi string có thứ tự, tối ưu cho thao tác ở **left/head** và **right/tail**.
 
 ```diagram
-        LPUSH                              RPUSH
-          │                                  │
-          ▼                                  ▼
+        LPUSH                                      RPUSH
+          │                                          │
+          ▼                                          ▼
    ╭──────────╮   ╭──────────╮   ╭──────────╮   ╭──────────╮
    │ index 0  │──▶│ index 1  │──▶│ index 2  │──▶│ index -1 │
    │  head    │◀──│          │◀──│          │◀──│  tail    │
    ╰──────────╯   ╰──────────╯   ╰──────────╯   ╰──────────╯
-          ▲                                  ▲
-          │                                  │
-        LPOP                               RPOP
+          ▲                                          ▲
+          │                                          │
+        LPOP                                        RPOP
 ```
 
 Quy ước nhớ nhanh:

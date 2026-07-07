@@ -176,8 +176,8 @@ Entry ID có dạng:
 
 ```text
 1783400000123-1
-└──────┬──────┘ └┬┘
-   ms timestamp  sequence trong cùng millisecond
+└────┬──────┘└┬┘
+ms timestamp  sequence trong cùng millisecond
 ```
 
 | Cách tạo ID | Ví dụ | Khi dùng |
