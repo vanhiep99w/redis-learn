@@ -7,8 +7,6 @@ Tài liệu học Redis tiếng Việt — Next.js + Fumadocs, deploy trên Clou
 ## Fundamentals
 
 - [x] [Redis Overview](redis-overview.md) - Redis là gì, in-memory data store, kiến trúc single-threaded, use cases tổng quan
-- [x] [Installation & Setup](installation-setup.md) - Cài đặt Redis (Docker, apt, source), redis.conf cơ bản, kết nối lần đầu
-- [x] [Redis CLI](redis-cli.md) - redis-cli commands thường dùng, KEYS vs SCAN, MONITOR, INFO
 
 ## Data Structures
 

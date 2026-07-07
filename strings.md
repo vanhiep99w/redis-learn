@@ -10,7 +10,8 @@
 - [4. SET và các option — nền tảng của lock & cache](#4-set-và-các-option--nền-tảng-của-lock--cache)
 - [5. TTL hoạt động thế nào](#5-ttl-hoạt-động-thế-nào)
 - [6. Bit operations](#6-bit-operations)
-- [7. Best Practices](#7-best-practices)
+- [7. Case study thực tế](#7-case-study-thực-tế)
+- [8. Best Practices](#8-best-practices)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -79,6 +80,21 @@ Chiến lược cấp phát khi APPEND làm string vượt `alloc`:
 ```
 
 Con số 44: khối malloc 64 bytes − 16 (robj) − 3 (sds header nhỏ nhất) − 1 (`\0`) = 44.
+
+### 1.3 Đo thử bằng MEMORY USAGE
+
+```
+127.0.0.1:6379> SET a 123456              # int
+127.0.0.1:6379> MEMORY USAGE a            → (integer) 56
+127.0.0.1:6379> SET b "hello world"       # embstr 11 bytes
+127.0.0.1:6379> MEMORY USAGE b            → (integer) 56
+127.0.0.1:6379> SET c "x...50 ký tự..."   # embstr sát ngưỡng
+127.0.0.1:6379> MEMORY USAGE c            → (integer) 104
+127.0.0.1:6379> SET d "y...45+ ký tự..."  # raw — vượt 44
+127.0.0.1:6379> MEMORY USAGE d            → (integer) 120   ← 2 khối malloc
+```
+
+Số liệu trên gồm cả overhead của key trong dict (~50 bytes: dict entry + SDS của tên key). Bài học: **tên key cũng là memory** — 100 triệu key tên dài 60 ký tự tốn ~6GB chỉ cho tên.
 
 > [!TIP]
 > Hệ quả thực tiễn: giữ value ngắn (id, token, số) rất rẻ. Hàng triệu counter kiểu `int` encoding tốn ít memory hơn nhiều so với JSON blob — xem [Memory Management](./memory-management.md).
@@ -214,7 +230,57 @@ Deep-dive và so sánh với HyperLogLog: [Bitmaps & HyperLogLog](./bitmaps-hype
 
 ---
 
-## 7. Best Practices
+## 7. Case study thực tế
+
+### 7.1 Cache HTML fragment — báo điện tử
+
+Bài toán: trang chi tiết bài viết render tốn 80ms (query + template), 95% request đọc cùng nội dung.
+
+```bash
+# Key theo version của bài — publish lại là key mới, khỏi lo invalidate:
+SET html:article:9911:v3 "<article>..." EX 3600
+GET html:article:9911:v3          # hit → trả thẳng, ~0.2ms
+```
+
+- **Thiết kế quan trọng nhất là invalidation**: nhúng version/updated_at vào key để không bao giờ phải DEL đuổi theo — key cũ tự hết hạn
+- HTML 50-200KB: cân nhắc nén gzip trước khi SET (CPU app đổi lấy network + memory Redis, thường lời 5-10×)
+- Chống **cache stampede** khi key hết hạn đúng lúc traffic cao: `SET lock:render:9911 1 NX EX 10` — chỉ 1 process render lại, số còn lại dùng bản cũ/chờ — chi tiết tại [Caching Patterns](./caching-patterns.md)
+
+### 7.2 Idempotency key — cổng thanh toán
+
+Bài toán: client retry request thanh toán (timeout, double-click) — không được trừ tiền 2 lần.
+
+```bash
+# Request mang header Idempotency-Key: 550e8400-...
+SET idem:550e8400 "processing" NX EX 86400
+# → OK   : lần đầu — xử lý thật
+# → nil  : đã có — trả kết quả cũ, KHÔNG xử lý lại
+
+# Xử lý xong, ghi đè kết quả (giữ TTL):
+SET idem:550e8400 '{"status":"success","txn":"T123"}' XX KEEPTTL
+```
+
+Điểm mấu chốt: `NX` biến "check-then-act" thành **một lệnh atomic** — hai request đến cùng lúc thì chỉ đúng một cái nhận OK, không cần lock ngoài.
+
+### 7.3 Counter tổng hợp ghi-nhiều đọc-ít — đếm view video
+
+Bài toán: 50K view/s, DB không chịu nổi 50K UPDATE/s, nhưng chấp nhận số liệu trễ 1 phút.
+
+```bash
+# Mọi app server chỉ INCR — không đọc, không ghi DB:
+INCR views:video:777
+
+# Cron mỗi phút flush về DB và trừ đi phần đã flush (không reset về 0 để khỏi mất INCR chen giữa):
+val = GET views:video:777
+UPDATE videos SET views = views + val WHERE id = 777
+DECRBY views:video:777 val        # atomic — phần INCR mới đến sau GET vẫn còn nguyên
+```
+
+Lưu ý độ bền: Redis restart giữa 2 lần flush có thể mất vài giây counter (tùy cấu hình [persistence](./persistence-strategies.md)) — chấp nhận được cho view count, **không** chấp nhận được cho số dư ví → loại bài toán đó thuộc về DB có transaction.
+
+---
+
+## 8. Best Practices
 
 - **Đặt tên key có cấu trúc**: `object:id:field` (`user:42:profile`) — dễ SCAN theo pattern, dễ đọc khi debug
 - **Luôn có TTL cho cache**: key không TTL chỉ dành cho dữ liệu chủ đích lưu lâu; kiểm soát bằng `maxmemory-policy volatile-*` — xem [Eviction Policies](./eviction-policies.md)
