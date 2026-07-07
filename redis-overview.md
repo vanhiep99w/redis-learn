@@ -284,5 +284,4 @@ Vì protocol đơn giản, việc gom nhiều command gửi một lần (pipelin
 - [Redis Documentation](https://redis.io/docs/)
 - [Redis internals — object encoding](https://redis.io/docs/latest/develop/reference/internals/)
 - [RESP protocol spec](https://redis.io/docs/latest/develop/reference/protocol-spec/)
-- [Installation & Setup](./installation-setup.md) — bước tiếp theo: cài đặt và cấu hình
-- [Redis CLI](./redis-cli.md) — công cụ làm việc hàng ngày
+- [Strings](./strings.md) — bước tiếp theo: bắt đầu học data structures
