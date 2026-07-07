@@ -1,0 +1,11 @@
+{
+  "name": "write-docs",
+  "description": "Technical documentation writing guide in Vietnamese with Next.js + Fumadocs + Cloudflare deployment",
+  "version": "1.0.0",
+  "author": {
+    "name": "Hiep Tran"
+  },
+  "keywords": ["docs", "documentation", "vietnamese", "cloudflare", "nextjs"],
+  "category": "documentation",
+  "skills": ["./"]
+}
