@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6ee7b7"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="#0c0e14"/>
+  <!-- cloud -->
+  <path d="M6 21a3 3 0 003 3h13a4 4 0 001.2-7.8A5 5 0 006.5 18.5 3 3 0 006 21z" fill="url(#g)" opacity="0.9"/>
+  <!-- checkmark -->
+  <polyline points="11,21 14.5,24.5 21,17" fill="none" stroke="#0c0e14" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
