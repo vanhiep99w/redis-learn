@@ -35,7 +35,7 @@ LPUSH feed:user:42 "đã đăng bài"
 LTRIM feed:user:42 0 99
 ```
 
-Sức mạnh của List nằm ở hai đầu, và cạm bẫy của nó cũng vậy: mọi thao tác ở **giữa** list (`LINDEX`, `LINSERT`, `LRANGE` một khoảng lớn) đều là O(N). Một lệnh nhìn vô hại như `LRANGE 0 -1` trên list cả triệu phần tử có thể bắt Redis serialize hàng trăm MB trên một **event loop** duy nhất (vòng xử lý lệnh theo mô hình **single-threaded** của Redis, xem [Redis Overview](./redis-overview.md)), làm chậm mọi client khác.
+Sức mạnh của List nằm ở hai đầu, và cạm bẫy của nó cũng vậy: mọi thao tác ở **giữa** list (`LINDEX`, `LINSERT`, `LRANGE` một khoảng lớn) đều là O(N). Một lệnh nhìn vô hại như `LRANGE 0 -1` trên list cả triệu phần tử có thể serialize hàng trăm MB và **block event loop** — làm chậm mọi client khác ([Redis Overview](./redis-overview.md)).
 
 Doc này trả lời các câu hỏi cốt lõi: vì sao `LPUSH`/`RPOP` là O(1) còn thao tác giữa list là O(N); List thật sự nằm trong memory thế nào (**quicklist** = danh sách liên kết các node, mỗi node thường chứa **listpack** = khối memory liên tục nhồi nhiều entry nhỏ); blocking queue "block" client ra sao mà server vẫn chạy; pattern reliable queue với `LMOVE`/`BLMOVE` tránh mất job; và khi nào nên chuyển sang [Streams](./streams.md), [Pub/Sub](./pub-sub.md) hay [Sorted Set](./sorted-sets.md).
 
@@ -502,7 +502,7 @@ Các số dưới đây là benchmark minh họa trên Redis local, payload JSON
 | `LREM q 0 job-x` | 1M | scan 1M | 35ms | 90ms | Dùng làm set là anti-pattern |
 
 > [!IMPORTANT]
-> Redis xử lý command trong event loop. Một command tạo reply 100MB không chỉ chậm cho client đó; nó còn trì hoãn command nhỏ của client khác.
+> Một lệnh reply 100MB không chỉ chậm cho client đó; nó **block event loop** và trì hoãn mọi lệnh khác ([Redis Overview](./redis-overview.md)).
 
 ### 8.2. Memory: listpack tiết kiệm nhưng không miễn phí
 
@@ -559,7 +559,7 @@ Minh họa với 1.000.000 element:
 - Cần broadcast realtime → dùng Pub/Sub.
 - Cần random access ở giữa list → List là O(N) ở giữa.
 
-Liên hệ nền tảng Redis và single-thread/event loop xem [Redis Overview](./redis-overview.md).
+Nền tảng event loop: [Redis Overview](./redis-overview.md).
 
 ---
 

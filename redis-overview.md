@@ -3,285 +3,438 @@
 ## Mục lục
 
 - [Tổng quan](#tổng-quan)
-- [Use Cases phổ biến](#use-cases-phổ-biến)
-- [1. Kiến trúc bên trong](#1-kiến-trúc-bên-trong)
-- [2. Event Loop & I/O Multiplexing](#2-event-loop--io-multiplexing)
-- [3. Vòng đời một command](#3-vòng-đời-một-command)
-- [4. Memory Model](#4-memory-model)
-- [5. RESP Protocol](#5-resp-protocol)
-- [6. Redis vs các hệ thống khác](#6-redis-vs-các-hệ-thống-khác)
-- [Tài liệu tham khảo](#tài-liệu-tham-khảo)
+- [Redis là gì?](#redis-là-gì)
+- [Redis không chỉ là cache](#redis-không-chỉ-là-cache)
+- [Redis khác database truyền thống như thế nào?](#redis-khác-database-truyền-thống-như-thế-nào)
+- [Mental model: Redis là server data structures trong RAM](#mental-model-redis-là-server-data-structures-trong-ram)
+- [Redis nhanh vì đâu?](#redis-nhanh-vì-đâu)
+- [Use cases phổ biến](#use-cases-phổ-biến)
+- [Khi nào nên dùng Redis?](#khi-nào-nên-dùng-redis)
+- [Khi nào không nên dùng Redis?](#khi-nào-không-nên-dùng-redis)
+- [Các khái niệm nền tảng cần biết](#các-khái-niệm-nền-tảng-cần-biết)
+- [Lộ trình học Redis trong repo này](#lộ-trình-học-redis-trong-repo-này)
+- [Tài liệu liên quan](#tài-liệu-liên-quan)
 
 ---
 
 ## Tổng quan
 
-Redis (**RE**mote **DI**ctionary **S**erver) là in-memory data structure store, dùng làm database, cache, message broker và streaming engine. Điểm khác biệt cốt lõi so với key-value store thông thường: **value không chỉ là string mà là các data structure thực thụ** (list, set, sorted set, hash, stream...) với các operation atomic trên server.
+**Redis** là một **in-memory data structure store**: dữ liệu được tổ chức theo dạng key-value, nhưng value không chỉ là chuỗi bytes đơn giản mà có thể là các cấu trúc dữ liệu giàu ngữ nghĩa như String, Hash, List, Set, Sorted Set, Stream, Bitmap, HyperLogLog và Geospatial index.
 
+Redis thường được dùng làm:
+
+- Cache tốc độ cao.
+- Session store.
+- Rate limiter.
+- Counter và realtime metrics.
+- Leaderboard.
+- Queue hoặc stream processing nhẹ.
+- Pub/Sub message broker.
+- Distributed lock.
+- Metadata store latency thấp.
+
+Điểm cần nhớ ngay từ đầu:
+
+```text
+Redis = data structures + RAM + network server + atomic commands
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Redis Server                     │
-│                                                     │
-│  ┌───────────────┐   ┌──────────────────────────┐   │
-│  │  Event Loop   │   │   Keyspace (dict)        │   │
-│  │ (single main  │──▶│   key ──▶ robj           │   │
-│  │    thread)    │   │   "user:1" ──▶ hash      │   │
-│  └───────────────┘   │   "queue"  ──▶ list      │   │
-│         ▲            │   "rank"   ──▶ zset      │   │
-│         │            └──────────────────────────┘   │
-│  ┌──────┴───────┐    ┌──────────────────────────┐   │
-│  │ I/O threads  │    │ Background threads:      │   │
-│  │ (read/write  │    │ - bio: fsync, lazy free  │   │
-│  │  socket)     │    │ - fork: BGSAVE, rewrite  │   │
-│  └──────────────┘    └──────────────────────────┘   │
-└─────────────────────────────────────────────────────┘
+
+Không nên hiểu Redis chỉ là “Map nằm trong memory”. Redis là một server độc lập, nhận command qua TCP, quản lý memory, TTL, persistence, replication, high availability và cluster routing.
+
+```text
+┌──────────────┐       TCP/RESP       ┌──────────────────────────┐
+│ Application  │ ───────────────────▶ │ Redis Server             │
+│              │ ◀─────────────────── │                          │
+└──────────────┘       response       │ keyspace: key → value    │
+                                      │ TTL / eviction / AOF/RDB │
+                                      │ replication / cluster    │
+                                      └──────────────────────────┘
 ```
 
 > [!IMPORTANT]
-> Redis thực thi command trên **một thread duy nhất**. Đây không phải điểm yếu mà là thiết kế chủ đích: không cần lock, mọi command đều atomic, và bottleneck thực tế thường là **memory bandwidth + network**, không phải CPU. Một instance Redis có thể xử lý 100K+ ops/sec.
-
-**Đặc điểm chính:**
-
-| Đặc điểm | Chi tiết |
-|----------|---------|
-| In-memory | Toàn bộ dataset nằm trong RAM → latency sub-millisecond |
-| Single-threaded execution | Command được xử lý tuần tự, atomic tự nhiên, không race condition |
-| Rich data structures | String, List, Set, Sorted Set, Hash, Stream, Bitmap, HyperLogLog, Geo |
-| Persistence tùy chọn | RDB snapshot và/hoặc AOF log — xem [RDB](./rdb.md), [AOF](./aof.md) |
-| Replication & HA | Master-replica, Sentinel, Cluster — xem [Replication](./replication.md) |
-| Server-side scripting | Lua script chạy atomic — xem [Lua Scripting](./lua-scripting.md) |
+> Redis rất nhanh, nhưng không phải phép màu. Vì Redis chủ yếu chạy trong RAM và execute command rất nhanh, những lỗi như big key, hot key, command O(N), TTL sai, connection pool sai hoặc persistence/failover sai có thể tạo sự cố rất lớn trong production.
 
 ---
 
-## Use Cases phổ biến
+## Redis là gì?
 
-| Use Case | Vì sao Redis phù hợp |
-|----------|---------------------|
-| **Cache** | Latency thấp, TTL per-key, eviction policies — xem [Caching Patterns](./caching-patterns.md) |
-| **Session store** | TTL tự động expire session, tốc độ đọc/ghi cao — xem [Session Store](./session-store.md) |
-| **Rate limiting** | INCR + EXPIRE atomic, Lua cho sliding window — xem [Rate Limiting](./rate-limiting.md) |
-| **Leaderboard** | Sorted Set: thêm/xếp hạng O(log N) — xem [Leaderboard](./leaderboard-counting.md) |
-| **Queue / job dispatch** | List với BLPOP blocking, Stream với consumer groups |
-| **Distributed lock** | SET NX PX atomic — xem [Distributed Lock](./distributed-lock.md) |
-| **Pub/Sub messaging** | Fire-and-forget broadcast — xem [Pub/Sub](./pub-sub.md) |
-| **Real-time analytics** | HyperLogLog đếm unique, Bitmap tracking theo ngày |
+Tên Redis là viết tắt của **REmote DIctionary Server**. “Dictionary” ở đây có thể hiểu là map/hash table từ key sang value.
 
----
-
-## 1. Kiến trúc bên trong
-
-### 1.1 Keyspace là một dict khổng lồ
-
-Mỗi database (mặc định 16 db, chọn bằng `SELECT`) về bản chất là một **hash table** (`dict` trong source code):
-
-```
-redisDb
-├── dict     : key → redisObject (dữ liệu chính)
-└── expires  : key → expire timestamp (chỉ chứa key có TTL)
-```
-
-- `dict` dùng **incremental rehashing**: khi hash table cần resize, Redis không rehash toàn bộ một lần (sẽ block event loop với hàng triệu key) mà giữ **2 hash table song song** và di chuyển dần từng bucket mỗi khi có operation chạm vào dict, cộng thêm 1ms mỗi vòng `serverCron`.
-- Vì vậy lookup key luôn là O(1) amortized kể cả khi đang rehash.
-
-### 1.2 redisObject (robj)
-
-Mọi value đều được wrap trong struct `redisObject`:
-
-```c
-typedef struct redisObject {
-    unsigned type:4;      // STRING, LIST, SET, ZSET, HASH, STREAM
-    unsigned encoding:4;  // cách lưu trữ thực tế bên dưới
-    unsigned lru:24;      // LRU clock hoặc LFU counter (cho eviction)
-    int refcount;
-    void *ptr;            // trỏ tới data structure thực
-} robj;
-```
-
-Điểm quan trọng: **`type` là API bên ngoài, `encoding` là cấu trúc thật bên trong**. Cùng một type có thể có nhiều encoding, Redis tự chuyển đổi khi dữ liệu lớn lên:
-
-| Type | Encoding khi nhỏ | Encoding khi lớn |
-|------|-----------------|------------------|
-| string | `int`, `embstr` (≤44 bytes) | `raw` (SDS) |
-| list | `listpack` | `quicklist` (linked list các listpack) |
-| set | `intset`, `listpack` | `hashtable` |
-| hash | `listpack` | `hashtable` |
-| zset | `listpack` | `skiplist` + `dict` |
-
-Kiểm tra bằng `OBJECT ENCODING key`. Encoding nhỏ tiết kiệm memory đáng kể (xem [Memory Management](./memory-management.md)).
-
-### 1.3 SDS — Simple Dynamic String
-
-Redis không dùng C string (`char*` null-terminated) mà dùng **SDS**:
-
-```
-+--------+-------+-----------------------+------+
-| len    | alloc | buf[]                 | '\0' |
-+--------+-------+-----------------------+------+
-```
-
-- `STRLEN` là O(1) (đọc `len`, không cần duyệt tìm `\0`)
-- Binary-safe: value có thể chứa byte `\0` (ảnh, protobuf, JSON...)
-- Pre-allocation: append nhiều lần không realloc mỗi lần
-
----
-
-## 2. Event Loop & I/O Multiplexing
-
-### 2.1 Vì sao single-threaded mà nhanh?
-
-Redis dùng **I/O multiplexing** (epoll trên Linux, kqueue trên BSD/macOS): một thread duy nhất theo dõi hàng nghìn socket cùng lúc, chỉ xử lý socket nào sẵn sàng.
-
-```mermaid
-flowchart LR
-    C1[Client 1] --> EP[epoll_wait]
-    C2[Client 2] --> EP
-    C3[Client N] --> EP
-    EP --> EL[Event Loop<br/>main thread]
-    EL --> R[Read command]
-    R --> X[Execute — atomic]
-    X --> W[Write reply buffer]
-    W --> EL
-```
-
-Lý do thiết kế này thắng multi-thread cho workload của Redis:
-
-1. **Không lock** — mọi thao tác trên keyspace không cần mutex → không contention, không deadlock
-2. **Không context switch** giữa các thread khi xử lý command
-3. Command trên in-memory data cực nhanh (microseconds) → CPU hiếm khi là bottleneck; nếu cần scale CPU thì chạy nhiều instance / [Cluster](./cluster.md)
-
-### 2.2 I/O Threads (Redis 6+)
-
-Từ Redis 6, phần **đọc/ghi socket và parse protocol** có thể chạy đa luồng (`io-threads` config), nhưng **execute command vẫn luôn single-threaded**. Điều này giúp scale phần tốn CPU nhất (network I/O + serialization) mà vẫn giữ tính atomic.
-
-```
-io-threads 4          # dùng 4 thread cho socket write
-io-threads-do-reads yes  # cho cả socket read
-```
-
-### 2.3 Background threads
-
-Một số việc chậm được đẩy sang thread nền (bio — background I/O):
-
-- `fsync` AOF (khi `appendfsync everysec`)
-- **Lazy freeing**: `UNLINK` / `FLUSHALL ASYNC` — xóa key lớn ở thread nền thay vì block event loop như `DEL`
-- Đóng file descriptor
-
-Và **fork child process** cho công việc nặng: `BGSAVE` (RDB), AOF rewrite — tận dụng copy-on-write của OS (chi tiết trong [RDB Snapshots](./rdb.md)).
-
-> [!TIP]
-> Hệ quả thực tiễn của single-thread: **một command chậm block tất cả client**. `KEYS *`, `SMEMBERS` trên set 10 triệu phần tử, `DEL` một hash khổng lồ — đều gây latency spike toàn hệ thống. Xem [Slow Log & Latency](./slow-log-latency.md).
-
----
-
-## 3. Vòng đời một command
-
-Điều gì xảy ra khi client gửi `SET user:1 "hiep"`:
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant K as Kernel (TCP)
-    participant E as Event Loop
-    participant D as Keyspace dict
-
-    C->>K: "*3\r\n$3\r\nSET\r\n$6\r\nuser:1\r\n$4\r\nhiep\r\n"
-    K->>E: epoll báo socket readable
-    E->>E: Đọc vào query buffer, parse RESP
-    E->>E: Lookup command table ("SET" → setCommand)
-    E->>E: Check ACL, check maxmemory (evict nếu cần)
-    E->>D: dictAdd("user:1", robj("hiep"))
-    E->>E: Propagate: ghi AOF buffer + replication buffer
-    E->>K: Ghi "+OK\r\n" vào output buffer
-    K->>C: Reply
-```
-
-Các bước đáng chú ý:
-
-1. **Parse**: command đến dưới dạng RESP (xem mục 5), được parse thành mảng argument
-2. **Lookup**: tên command tra trong command table — O(1)
-3. **Pre-checks**: ACL permission, memory limit (nếu vượt `maxmemory` → chạy eviction trước, xem [Eviction Policies](./eviction-policies.md))
-4. **Execute**: gọi hàm command trực tiếp trên dict — không lock
-5. **Propagate**: nếu command làm thay đổi dữ liệu → append vào AOF buffer và replication backlog
-6. **Reply**: ghi vào output buffer của client, event loop flush khi socket writable
-
-### Expire hoạt động thế nào?
-
-Key có TTL bị xóa theo **2 cơ chế kết hợp**:
-
-- **Lazy expiration**: mỗi lần truy cập key, Redis check timestamp trong `expires` dict — nếu hết hạn thì xóa và trả về nil
-- **Active expiration**: `serverCron` (mặc định 10 lần/giây) lấy mẫu ngẫu nhiên 20 key trong `expires`, xóa key hết hạn; nếu >25% mẫu đã hết hạn thì lặp lại ngay
-
-→ Hệ quả: key hết hạn **không bị xóa ngay lập tức** khỏi memory; memory chỉ được giải phóng dần. `TTL`/`PTTL` để kiểm tra thời gian còn lại.
-
----
-
-## 4. Memory Model
-
-- **Toàn bộ dataset phải vừa trong RAM.** Redis không tự spill xuống disk (khác Memcached extstore hay database truyền thống).
-- Allocator mặc định là **jemalloc** — giảm fragmentation so với libc malloc.
-- `maxmemory` + eviction policy quyết định hành vi khi đầy memory:
+Ví dụ đơn giản:
 
 ```bash
-maxmemory 4gb
-maxmemory-policy allkeys-lru   # hoặc volatile-lru, allkeys-lfu, noeviction...
+SET user:1:name "Hiep"
+GET user:1:name
 ```
 
-- `INFO memory` cho biết `used_memory` (dữ liệu) vs `used_memory_rss` (OS cấp phát) — tỉ lệ `mem_fragmentation_ratio` > 1.5 là dấu hiệu fragmentation.
+Nhưng Redis không dừng ở `GET/SET`. Redis cho phép thao tác trực tiếp lên data structure ở server:
 
-Chi tiết: [Memory Management](./memory-management.md), [Eviction Policies](./eviction-policies.md).
+```bash
+HSET user:1 name "Hiep" age 28
+LPUSH queue:email job-123
+SADD post:1:likes user:1 user:2
+ZADD leaderboard 9999 user:1
+XADD events:* type signup user_id 1
+```
+
+Điều này rất khác với việc lưu JSON string rồi application tự parse/sửa/ghi lại. Redis cung cấp operation atomic ở server cho từng structure.
+
+Ví dụ tăng counter:
+
+```bash
+INCR page:home:views
+```
+
+Nếu 100 clients cùng gọi `INCR`, Redis serialize command và đảm bảo counter tăng đúng, không cần application lock.
 
 ---
 
-## 5. RESP Protocol
+## Redis không chỉ là cache
 
-Redis Serialization Protocol — text-based, cực đơn giản để parse:
+Nhiều người học Redis từ cache, nhưng Redis rộng hơn cache.
 
-```
-Client gửi:  SET user:1 hiep
-Trên wire:   *3\r\n           ← array 3 phần tử
-             $3\r\nSET\r\n    ← bulk string dài 3
-             $6\r\nuser:1\r\n
-             $4\r\nhiep\r\n
+### Redis như cache
 
-Server trả:  +OK\r\n          ← simple string
+```text
+App → Redis cache → Database
 ```
 
-Các kiểu reply chính (RESP2):
+Nếu cache hit, app tránh query database. Nếu cache miss, app query DB rồi ghi lại Redis với TTL.
 
-| Prefix | Kiểu | Ví dụ |
-|--------|------|-------|
-| `+` | Simple string | `+OK\r\n` |
-| `-` | Error | `-ERR unknown command\r\n` |
-| `:` | Integer | `:42\r\n` |
-| `$` | Bulk string | `$4\r\nhiep\r\n` (`$-1` = nil) |
-| `*` | Array | `*2\r\n...` |
+```bash
+SET product:123 '{...json...}' EX 300
+GET product:123
+```
 
-**RESP3** (Redis 6+, bật bằng `HELLO 3`) thêm map, set, double, big number và **push message** — nền tảng cho [Client-Side Caching](./client-side-caching.md).
+### Redis như data structure server
 
-Vì protocol đơn giản, việc gom nhiều command gửi một lần (pipelining) rất hiệu quả — xem [Pipelining & Batching](./pipelining-batching.md).
+Redis có thể giữ trạng thái realtime mà database quan hệ xử lý kém hơn:
+
+```bash
+ZINCRBY leaderboard:daily 10 user:123
+ZRANGE leaderboard:daily 0 9 REV WITHSCORES
+```
+
+### Redis như coordination primitive
+
+```bash
+SET lock:order:123 token NX PX 30000
+```
+
+Lệnh trên là nền tảng của distributed lock đơn giản vì `SET NX PX` atomic.
+
+### Redis như streaming engine
+
+```bash
+XADD order-events * order_id 123 status paid
+XREADGROUP GROUP workers worker-1 STREAMS order-events >
+```
+
+Redis Streams hỗ trợ event log, consumer groups, ack/retry.
+
+> [!NOTE]
+> Redis có thể dùng làm primary database cho một số workload, nhưng cần hiểu rõ persistence, memory limit, backup, failover và consistency. Với dữ liệu critical, đừng dùng Redis như source of truth nếu chưa thiết kế durability đầy đủ.
 
 ---
 
-## 6. Redis vs các hệ thống khác
+## Redis khác database truyền thống như thế nào?
 
-| Tiêu chí | Redis | Memcached | RDBMS (Postgres) |
-|----------|-------|-----------|------------------|
-| Data model | Rich structures | Chỉ string/blob | Relational, SQL |
-| Threading | Single-thread exec + I/O threads | Multi-thread | Multi-process/thread |
-| Persistence | RDB/AOF tùy chọn | Không | WAL, ACID đầy đủ |
-| Replication | Built-in master-replica | Không (client-side) | Streaming replication |
-| Atomic operations | Mọi command + Lua/MULTI | CAS đơn giản | Transaction đầy đủ |
-| Use case chính | Cache + data structures + queue | Pure cache | Source of truth |
+| Khía cạnh | Redis | Database quan hệ / document DB thường gặp |
+|----------|-------|--------------------------------------------|
+| Storage chính | RAM | Disk/SSD + buffer cache |
+| Latency | Thường sub-ms đến vài ms | Thường cao hơn, tùy query/index |
+| Data model | Key-value + data structures | Table/document/graph/... |
+| Query | Command theo key/structure | SQL/query language/index phong phú |
+| Transaction | Atomic command, `MULTI/EXEC`, Lua | ACID transaction mạnh hơn |
+| Scale write | Cluster sharding theo hash slots | Tùy database, thường phức tạp hơn |
+| Durability | RDB/AOF tùy config | Thường durable mặc định hơn |
+| Memory cost | Cao vì giữ dataset trong RAM | Tối ưu lưu trữ disk tốt hơn |
 
-**Khi nào dùng Redis:** cần latency < 1ms, data structure operations (ranking, counting, queue), TTL/eviction tự nhiên, pub/sub nhẹ.
+Redis giỏi nhất khi bạn biết key cần truy cập. Redis không phải hệ thống query ad-hoc mạnh như PostgreSQL/Elasticsearch.
 
-**Khi nào KHÔNG dùng Redis:** dataset lớn hơn RAM nhiều lần, cần query phức tạp (join, ad-hoc filter), cần durability tuyệt đối từng transaction (AOF `always` rất chậm), dữ liệu là source of truth duy nhất mà không có backup strategy.
+Ví dụ phù hợp Redis:
+
+```bash
+GET session:abc
+HGET user:123 profile_json
+ZRANGE leaderboard 0 99 REV
+```
+
+Ví dụ không phù hợp Redis nếu làm trực tiếp:
+
+```sql
+SELECT * FROM orders
+WHERE amount > 1000
+  AND created_at BETWEEN ...
+  AND status IN (...)
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Muốn làm kiểu query phức tạp trong Redis cần thiết kế index thủ công hoặc dùng module như RediSearch/Redis Stack. Đó là câu chuyện khác.
 
 ---
 
-## Tài liệu tham khảo
+## Mental model: Redis là server data structures trong RAM
 
-- [Redis Documentation](https://redis.io/docs/)
-- [Redis internals — object encoding](https://redis.io/docs/latest/develop/reference/internals/)
-- [RESP protocol spec](https://redis.io/docs/latest/develop/reference/protocol-spec/)
-- [Strings](./strings.md) — bước tiếp theo: bắt đầu học data structures
+Hãy hình dung Redis như một process quản lý một keyspace lớn:
+
+```text
+Redis keyspace
+├── "session:abc"       → String      "{user_id:123,...}"   TTL 30m
+├── "user:123"          → Hash        name/email/plan
+├── "queue:email"       → List        [job3, job2, job1]
+├── "post:9:likes"      → Set         {user1,user2,user3}
+├── "leaderboard"       → Sorted Set  user → score
+└── "events"            → Stream      append-only entries
+```
+
+Mỗi command đi vào Redis event loop, được execute tuần tự:
+
+```text
+Client A: INCR counter
+Client B: INCR counter
+Client C: GET counter
+
+Redis execute:
+1. INCR counter
+2. INCR counter
+3. GET counter
+```
+
+Vì command được execute tuần tự trên main thread, từng command đơn lẻ là atomic.
+
+### Key là đơn vị định danh
+
+Key là tên duy nhất trong database Redis. Thiết kế key tốt giúp:
+
+- Dễ debug.
+- Tránh conflict namespace.
+- Hỗ trợ TTL đúng.
+- Hạn chế hot key/big key.
+- Dễ dùng Cluster hash tags.
+
+Ví dụ tốt:
+
+```text
+user:123:profile
+session:8f3a...
+rate:user:123:2026-07-08T10:30
+product:456:cache
+```
+
+Chi tiết xem [Keys, Naming & TTL](./keys-and-ttl.md).
+
+---
+
+## Redis nhanh vì đâu?
+
+Redis nhanh do kết hợp nhiều yếu tố, không phải chỉ vì “viết bằng C”.
+
+| Yếu tố | Tác dụng |
+|--------|----------|
+| In-memory | Không phải đọc disk trong request path thông thường |
+| Event loop | Xử lý nhiều connections với overhead thấp |
+| Single-threaded command execution | Không lock khi thao tác keyspace |
+| Data structures tối ưu | Hash table, listpack, skiplist, intset, SDS |
+| Protocol đơn giản | RESP dễ parse, ít overhead |
+| Pipelining | Giảm round-trip network |
+| Background work | RDB/AOF rewrite/lazy free giảm block main path |
+
+Nhưng Redis cũng có giới hạn:
+
+- Một command chậm block các command sau.
+- Dataset phải vừa RAM.
+- Network round-trip vẫn quan trọng.
+- Persistence/fork có thể gây latency spike.
+- Replication async có thể mất write mới nhất khi failover.
+
+Nếu muốn hiểu sâu cơ chế event loop, command lifecycle, memory object, hãy đọc [Redis Architecture](./redis-architecture.md).
+
+---
+
+## Use cases phổ biến
+
+### Cache
+
+Redis phù hợp làm cache vì latency thấp, hỗ trợ TTL per-key và eviction policy.
+
+```bash
+SET product:123 '{"id":123,"name":"Keyboard"}' EX 300
+GET product:123
+```
+
+Đọc thêm: [Caching Patterns](./caching-patterns.md), [Eviction Policies](./eviction-policies.md).
+
+### Session store
+
+Session cần lookup nhanh theo token/session id và tự hết hạn.
+
+```bash
+SET session:abc '{"user_id":123}' EX 1800
+```
+
+Đọc thêm: [Session Store](./session-store.md).
+
+### Rate limiting
+
+Counter + TTL rất phù hợp cho fixed window rate limit.
+
+```bash
+INCR rate:user:123:minute:202607081030
+EXPIRE rate:user:123:minute:202607081030 60
+```
+
+Đọc thêm: [Rate Limiting](./rate-limiting.md).
+
+### Leaderboard
+
+Sorted Set là data structure kinh điển cho ranking.
+
+```bash
+ZADD game:rank 1200 user:1
+ZREVRANGE game:rank 0 9 WITHSCORES
+```
+
+Đọc thêm: [Sorted Sets](./sorted-sets.md), [Leaderboard & Counting](./leaderboard-counting.md).
+
+### Queue đơn giản
+
+List hỗ trợ push/pop và blocking pop.
+
+```bash
+LPUSH queue:email job-1
+BRPOP queue:email 5
+```
+
+Đọc thêm: [Lists](./lists.md).
+
+### Event stream
+
+Streams phù hợp hơn List khi cần consumer groups, ack, replay.
+
+```bash
+XADD events:* type signup user_id 123
+```
+
+Đọc thêm: [Streams](./streams.md).
+
+### Pub/Sub
+
+Redis Pub/Sub phù hợp broadcast realtime fire-and-forget.
+
+```bash
+PUBLISH notifications "hello"
+SUBSCRIBE notifications
+```
+
+Đọc thêm: [Pub/Sub](./pub-sub.md).
+
+---
+
+## Khi nào nên dùng Redis?
+
+Redis phù hợp khi bạn có một hoặc nhiều đặc điểm sau:
+
+| Dấu hiệu | Ví dụ |
+|----------|-------|
+| Cần latency rất thấp | session lookup, feature flag, cache hot data |
+| Access theo key rõ ràng | `GET session:<id>`, `HGET user:<id>` |
+| Cần TTL tự động | cache, token, OTP, rate limit window |
+| Cần counter atomic | view count, quota, inventory hold ngắn hạn |
+| Cần data structure realtime | leaderboard, set membership, queue |
+| Cần giảm tải database | cache-aside, read-through cache |
+| Có thể chịu eventual consistency | replica reads, async failover |
+
+Một câu hỏi thực tế:
+
+```text
+Nếu Redis mất dữ liệu 1 phút gần nhất, hệ thống có chấp nhận không?
+```
+
+Nếu câu trả lời là “không bao giờ”, bạn cần thiết kế persistence/replication/failover rất cẩn thận hoặc dùng database khác làm source of truth.
+
+---
+
+## Khi nào không nên dùng Redis?
+
+### 1. Dataset lớn hơn RAM quá nhiều
+
+Redis giữ dataset trong RAM. Nếu dữ liệu hàng TB và access không quá hot, database disk-based có thể hợp lý hơn.
+
+### 2. Cần query phức tạp ad-hoc
+
+Redis không thay thế SQL database cho report/query tùy ý.
+
+### 3. Cần transaction ACID phức tạp
+
+Redis có atomic command, `MULTI/EXEC`, Lua, nhưng không giống transaction engine của PostgreSQL.
+
+### 4. Cần strong consistency đa node
+
+Replication/Sentinel/Cluster của Redis OSS dùng async replication. Có cửa sổ mất write khi failover.
+
+### 5. Không có khả năng vận hành memory/latency
+
+Redis production cần monitor memory, fragmentation, big keys, slow commands, persistence, replication lag.
+
+> [!WARNING]
+> Redis rất dễ bắt đầu, nhưng cũng rất dễ bị dùng sai: lưu object quá lớn, không TTL cho cache, dùng `KEYS *`, đọc replica ngay sau write, hard-code master IP, không backup, hoặc không test failover.
+
+---
+
+## Các khái niệm nền tảng cần biết
+
+| Khái niệm | Ý nghĩa | Đọc thêm |
+|----------|---------|----------|
+| Keyspace | Tập key trong Redis DB | [Keys, Naming & TTL](./keys-and-ttl.md) |
+| Data type | Loại value: string/hash/list/... | [Strings](./strings.md), [Hashes](./hashes.md) |
+| TTL | Thời gian sống của key | [Keys, Naming & TTL](./keys-and-ttl.md) |
+| Atomic command | Command đơn lẻ không bị interleave | [Redis Architecture](./redis-architecture.md) |
+| Pipelining | Gửi nhiều command không chờ từng response | [Pipelining & Batching](./pipelining-batching.md) |
+| Persistence | Ghi dữ liệu xuống disk bằng RDB/AOF | [Persistence Strategies](./persistence-strategies.md) |
+| Replication | Master gửi stream thay đổi sang replica | [Replication](./replication.md) |
+| Sentinel | HA/failover cho Redis không sharding | [Redis Sentinel](./sentinel.md) |
+| Cluster | Sharding bằng 16384 hash slots | [Redis Cluster](./cluster.md) |
+| Eviction | Xóa key khi vượt `maxmemory` | [Eviction Policies](./eviction-policies.md) |
+
+---
+
+## Lộ trình học Redis trong repo này
+
+Nếu bạn mới học Redis, nên đi theo flow:
+
+```text
+1. Redis Overview
+2. Redis Architecture
+3. Keys, Naming & TTL
+4. Data Structures
+5. Persistence
+6. Replication / Sentinel / Cluster
+7. Performance
+8. Patterns & Use Cases
+9. Operations
+```
+
+Gợi ý cụ thể:
+
+1. Đọc doc này để có mental model.
+2. Đọc [Redis Architecture](./redis-architecture.md) để hiểu vì sao Redis nhanh và vì sao command chậm nguy hiểm.
+3. Đọc [Keys, Naming & TTL](./keys-and-ttl.md) trước khi thiết kế key production.
+4. Đọc lần lượt Data Structures: [Strings](./strings.md), [Hashes](./hashes.md), [Lists](./lists.md), [Sets](./sets.md), [Sorted Sets](./sorted-sets.md), [Streams](./streams.md).
+5. Đọc Persistence và HA nếu Redis giữ dữ liệu quan trọng.
+6. Đọc Performance/Operations trước khi deploy production.
+
+---
+
+## Tài liệu liên quan
+
+- [Redis Architecture](./redis-architecture.md) - Event loop, single-threaded execution, command lifecycle, memory internals.
+- [Keys, Naming & TTL](./keys-and-ttl.md) - Thiết kế key, TTL, expire, hot key, big key.
+- [Strings](./strings.md) - Data type cơ bản nhất trong Redis.
+- [Caching Patterns](./caching-patterns.md) - Cache-aside, write-through, stampede, TTL strategies.
+- [Persistence Strategies](./persistence-strategies.md) - RDB/AOF/hybrid.
+- [Replication](./replication.md) - Master-replica, offset, backlog.
+- [Redis Sentinel](./sentinel.md) - Automatic failover.
+- [Redis Cluster](./cluster.md) - Sharding với hash slots.
+- [Redis official docs: Get started](https://redis.io/docs/latest/develop/get-started/)

@@ -6,18 +6,22 @@ Tài liệu học Redis tiếng Việt — Next.js + Fumadocs, deploy trên Clou
 
 ## Fundamentals
 
-- [x] [Redis Overview](redis-overview.md) - Redis là gì, in-memory data store, kiến trúc single-threaded, use cases tổng quan
+- [x] [Redis Overview](redis-overview.md) - Redis là gì, in-memory data store, use cases, khi nào nên/không nên dùng
+- [x] [Redis Architecture](redis-architecture.md) - Event loop, single-threaded execution, command lifecycle, keyspace internals
+- [x] [Keys, Naming & TTL](keys-and-ttl.md) - Key design, namespace, TTL, expire behavior, hot keys và big keys
 
 ## Data Structures
+
+**Lộ trình đọc (sidebar theo thứ tự này):** Strings → Hashes → Lists → Sets → Sorted Sets → Bitmaps & HLL → Geospatial → **Streams** (nên đọc **sau [Lists](lists.md)** — queue đơn giản trước, log có ack/replay sau).
 
 - [x] [Strings](strings.md) - GET/SET, INCR/DECR, TTL, bit operations, use cases counter và cache
 - [x] [Hashes](hashes.md) - HSET/HGETALL, object storage, field-level operations, memory efficiency
 - [x] [Lists](lists.md) - LPUSH/RPUSH, LRANGE, blocking operations (BLPOP), queue patterns
 - [x] [Sets](sets.md) - SADD/SMEMBERS, set operations (union, intersect, diff), random members
 - [x] [Sorted Sets](sorted-sets.md) - ZADD/ZRANGE, score-based ranking, leaderboard, range queries
-- [x] [Streams](streams.md) - XADD/XREAD, consumer groups, event sourcing, so sánh với Kafka
 - [x] [Bitmaps & HyperLogLog](bitmaps-hyperloglog.md) - SETBIT/BITCOUNT, PFADD/PFCOUNT, đếm unique với memory tối thiểu
 - [x] [Geospatial](geospatial.md) - GEOADD/GEOSEARCH, tìm kiếm theo vị trí, radius queries
+- [x] [Streams](streams.md) - XADD/XREAD, consumer groups, event sourcing; đọc sau Lists, so sánh Pub/Sub/Kafka
 
 ## Persistence
 

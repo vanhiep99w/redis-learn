@@ -65,7 +65,7 @@ Không có “geo tree” riêng. Không có R-tree. Không có per-member metad
 | `ZRANGE key ... WITHSCORES` | thấy raw geohash score |
 
 > [!TIP]
-> Aha quan trọng nhất: **mọi thứ bạn biết về Sorted Set vẫn áp dụng** — memory, O(log N) (chi phí tăng theo logarit số phần tử), big key (một key quá lớn gây nặng memory/latency), single-threaded blocking (Redis xử lý command trên một luồng chính nên command nặng làm lệnh khác chờ), hash slot (ô phân vùng mà Redis Cluster dùng để gán key vào node), `ZREM`, `ZCARD`, `ZSCAN`, `ZRANGE`.
+> Aha quan trọng nhất: **Geo là ZSet** — memory, O(log N), big key, lệnh nặng **block event loop**, hash slot Cluster, `ZREM`/`ZCARD`/`ZSCAN` ([Sorted Sets](./sorted-sets.md), [Redis Overview](./redis-overview.md)).
 
 Hệ quả thiết kế:
 
@@ -300,7 +300,7 @@ Scan 1 + 8 area:
 ```
 
 > [!NOTE]
-> Geo search không tỷ lệ trực tiếp với tổng số member trong key nếu radius nhỏ. Nó tỷ lệ với **mật độ điểm trong vùng bounding grid**. Nhưng radius lớn ở khu đông điểm sẽ làm query nặng và có thể block event loop Redis (vòng xử lý command chính của Redis).
+> Geo search phụ thuộc **mật độ trong vùng grid**, không phải tổng member toàn key. Radius lớn ở khu đông → query nặng, có thể **block event loop** ([Redis Overview](./redis-overview.md)).
 
 ---
 
@@ -316,7 +316,7 @@ Cost GEOSEARCH ≈
 + response_size                     # network + serialization
 ```
 
-Vì Redis chạy command trong event loop, một query “trả về 80.000 điểm” không chỉ chậm cho client đó; nó còn làm các client khác chờ.
+Query trả hàng chục nghìn điểm **block event loop** — client khác phải chờ ([Redis Overview](./redis-overview.md)).
 
 ### 6.2. Benchmark tư duy theo radius
 

@@ -107,7 +107,7 @@ Vì Bitmap là String, nó chịu giới hạn String tối đa **512MB**. 512MB
 | 4,000,000,000 | ~500MB | Một lệnh `SETBIT` có thể cấp phát khổng lồ |
 
 > [!WARNING]
-> `SETBIT key 4000000000 1` trên key rỗng không lưu “một bit thưa”. Redis phải mở rộng String đến offset đó và pad toàn bộ khoảng trống bằng `0`, tức khoảng **500MB**. Lệnh này có thể block event loop (vòng xử lý lệnh single-threaded của Redis) trong lúc cấp phát. Nếu ID là UUID/snowflake/thưa, đừng dùng trực tiếp làm offset.
+> `SETBIT key 4000000000 1` trên key rỗng pad ~**500MB** và có thể **block event loop** lúc cấp phát ([Redis Overview](./redis-overview.md)). ID UUID/snowflake thưa → HLL hoặc mapping int, đừng dùng làm offset.
 
 ### 3.2. Vì sao BITCOUNT nhanh nhưng vẫn là O(N)?
 

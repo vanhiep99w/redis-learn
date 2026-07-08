@@ -202,7 +202,7 @@ INCRBY pageviews 10   # 11
 INCR notanumber       # ERR value is not an integer
 ```
 
-Redis xử lý command trong event loop single-threaded (một vòng lặp xử lý lệnh chính chạy tuần tự trên một thread, xem [Redis Overview](./redis-overview.md)):
+Redis xử lý lệnh **tuần tự trên event loop** (một lệnh nặng làm chậm client khác — xem [Redis Overview](./redis-overview.md) § Event Loop):
 
 ```diagram
 Client A: INCR counter ─┐

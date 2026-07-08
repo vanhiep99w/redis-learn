@@ -24,7 +24,7 @@
 
 Rất nhiều bài toán thực tế quy về cùng một câu hỏi: **"phần tử này đã có chưa?"** — user đã xem bài viết chưa, event này đã xử lý chưa, tài khoản có nằm trong whitelist không. Khi đó thứ ta cần không phải một danh sách có thứ tự, mà là một **tập hợp các phần tử duy nhất** với khả năng kiểm tra membership tức thì.
 
-Đó là Redis Set: tập hợp không thứ tự các string, tự động khử trùng, cho phép hỏi "có/không" trong O(1) và — điểm mạnh riêng của Redis — thực hiện **phép toán tập hợp (giao, hợp, hiệu) ngay trên server**. Vì Redis xử lý command trong một event loop / single-threaded execution model (một luồng chính chạy tuần tự từng lệnh), một lệnh đúng chỗ thường vừa nhanh vừa tránh race condition ở phía app.
+Đó là Redis Set: tập hợp không thứ tự các string, tự động khử trùng, cho phép hỏi "có/không" trong O(1) và — điểm mạnh riêng của Redis — thực hiện **phép toán tập hợp (giao, hợp, hiệu) ngay trên server**. Lệnh chạy **tuần tự trên event loop** — một lệnh đúng chỗ vừa nhanh vừa tránh race ở app ([Redis Overview](./redis-overview.md)).
 
 ```bash
 SADD seen:2026-07-07 evt_8Kj2m       # trả 1 nếu mới, 0 nếu đã có
@@ -387,7 +387,7 @@ Memory trực giác:
 ```
 
 > [!CAUTION]
-> Redis single-thread cho command execution. Một command O(N) trả reply khổng lồ không chỉ chậm cho caller; nó làm các request khác xếp hàng phía sau.
+> Lệnh O(N) + reply khổng lồ **block event loop** — request khác xếp hàng phía sau ([Redis Overview](./redis-overview.md)).
 
 ---
 
