@@ -38,14 +38,14 @@ Câu hỏi cốt lõi không phải "Redis có nhanh không" (nó rất nhanh), 
 - Cần một hàng đợi đơn giản, mỗi job đúng một worker → [List](./lists.md).
 - Cần log lưu lại, đọc lại được, nhiều nhóm consumer độc lập, có ack/retry → **Streams**.
 
-Redis Streams là một **append-only log nằm trong Redis**: mỗi entry có ID tăng dần, đọc lại được theo khoảng thời gian, nhiều consumer group xử lý song song và độc lập, kèm cơ chế ack/claim để không mất message khi worker chết.
+Redis Streams là một **append-only log** (chỉ ghi thêm vào cuối, không sửa entry cũ; xem thêm [Redis Overview](./redis-overview.md)) nằm trong Redis: mỗi entry có ID tăng dần, đọc lại được theo khoảng thời gian, nhiều **consumer group** (nhóm worker cùng chia việc trên một stream) xử lý song song và độc lập, kèm cơ chế ack/claim để không mất message khi worker chết.
 
 ```bash
 XADD orders '*' order_id 8812 amount 250000        # append, ID tự sinh
 XREADGROUP GROUP payment w1 COUNT 10 STREAMS orders '>'
 ```
 
-Doc này đi sâu vào cách Streams lưu trữ (radix tree + macro-node), cơ chế consumer group và PEL, cách recovery bằng `XCLAIM`/`XAUTOCLAIM`, và ranh giới rõ ràng giữa Streams với Pub/Sub, List và Kafka — để bạn biết khi nào Streams là đủ và khi nào cần một hệ thống chuyên dụng.
+Doc này đi sâu vào cách Streams lưu trữ bằng **radix tree (`rax`)** (cây index nén prefix ID) + **listpack/macro-node** (block compact chứa nhiều entry), cơ chế consumer group và **PEL (Pending Entries List)**, cách recovery bằng `XCLAIM`/`XAUTOCLAIM`, và ranh giới rõ ràng giữa Streams với Pub/Sub, List và Kafka — để bạn biết khi nào Streams là đủ và khi nào cần một hệ thống chuyên dụng.
 
 ---
 
@@ -109,7 +109,7 @@ macro-node B / listpack
 
 ### 3.1. Vì sao radix tree hợp với Stream ID?
 
-Stream ID là chuỗi số tăng dần. Radix tree nén prefix chung giữa các ID, nên các ID gần nhau chia sẻ nhiều byte đầu:
+Radix tree là phần giúp Redis tìm đúng vùng dữ liệu nhanh, giống mục lục nén cho các ID đang tăng dần. Stream ID là chuỗi số tăng dần; radix tree nén prefix chung giữa các ID, nên các ID gần nhau chia sẻ nhiều byte đầu:
 
 ```diagram
 1783400000...
@@ -131,6 +131,8 @@ Hệ quả:
 Redis docs mô tả lookup entry đơn là O(n) theo độ dài ID; vì ID ngắn và cố định, thực tế gần như constant. Range thì vẫn phụ thuộc số entry trả về.
 
 ### 3.2. Listpack macro-node tiết kiệm RAM bằng cách nào?
+
+Listpack macro-node là cách Redis gom nhiều entry nhỏ vào một block liền mạch, để không phải trả chi phí object/pointer cho từng message. Điều này đặc biệt quan trọng vì event thực tế thường nhỏ nhưng rất nhiều.
 
 Một order event thường lặp lại schema:
 
@@ -154,7 +156,7 @@ Nếu lưu field name `event`, `order_id`, `amount`, `uid` cho từng entry thì
 
 ### 3.3. Aha moment: tại sao `MAXLEN ~` rẻ hơn `MAXLEN =`?
 
-Vì Stream được đóng gói theo macro-node. Cắt chính xác từng entry ở giữa listpack có thể phải mở/sửa macro-node. Cắt approximate cho phép Redis đợi đến khi có thể **evict cả macro-node**.
+Trim là thao tác dọn bớt entry cũ để Stream không phình RAM; khác biệt giữa `~` và `=` nằm ở mức Redis được phép “dọn theo block” hay phải “cắt đúng từng dòng”. Vì Stream được đóng gói theo macro-node, cắt chính xác từng entry ở giữa listpack có thể phải mở/sửa macro-node. Cắt approximate cho phép Redis đợi đến khi có thể **evict cả macro-node**.
 
 ```diagram
 Exact trim (= 1000)
@@ -369,7 +371,7 @@ XREADGROUP GROUP g:payment payment-1 COUNT 50 STREAMS orders 0
 
 ## 8. PEL, XACK, XPENDING, XCLAIM, XAUTOCLAIM — recovery đúng cách
 
-PEL = **Pending Entries List**: danh sách entry đã giao cho consumer nhưng chưa `XACK`.
+Khi worker nhận message rồi chết trước khi ack, Redis cần một “sổ nợ” để biết message nào đang lơ lửng và ai đang giữ nó. PEL = **Pending Entries List**: danh sách entry đã giao cho consumer nhưng chưa `XACK`.
 
 Redis duy trì PEL ở hai mức:
 
@@ -377,6 +379,8 @@ Redis duy trì PEL ở hai mức:
 - **Per-consumer PEL**: biết consumer nào đang giữ entry nào, phục vụ đọc lại pending của chính consumer.
 
 ### 8.1. XPENDING — nhìn vấn đề trước khi sửa
+
+`XPENDING` là lệnh để nhìn vào “sổ nợ” đó trước khi đụng vào recovery: có bao nhiêu message đang kẹt, kẹt ở consumer nào, và đã idle bao lâu.
 
 ```bash
 # Summary: tổng pending, min/max ID, pending theo consumer
@@ -400,6 +404,8 @@ Ví dụ extended output đáng chú ý:
 
 ### 8.2. XCLAIM — claim có chọn lọc
 
+`XCLAIM` giống thao tác chuyển một việc đang kẹt từ worker cũ sang worker mới, nhưng chỉ khi bạn đã biết chính xác ID cần xử lý lại.
+
 ```bash
 XCLAIM orders g:payment payment-1 60000 1783400000300-0
 # key    group     new-owner min-idle-time id
@@ -419,6 +425,8 @@ Options hữu ích:
 
 ### 8.3. XAUTOCLAIM — janitor thực tế
 
+`XAUTOCLAIM` là phiên bản phù hợp cho janitor chạy định kỳ: nó tự quét PEL theo cursor, nhặt các entry idle quá lâu và giao lại cho consumer recovery.
+
 ```bash
 XAUTOCLAIM orders g:payment payment-janitor 60000 0 COUNT 100
 # → trả cursor kế tiếp + các entry claimed
@@ -431,6 +439,8 @@ XAUTOCLAIM orders g:payment payment-janitor 60000 0 COUNT 100
 
 ### 8.4. XACK — xóa khỏi PEL, không xóa khỏi stream
 
+`XACK` là bước worker báo “việc này xong rồi”, để Redis gỡ entry khỏi danh sách pending của group.
+
 ```bash
 XACK orders g:payment 1783400000300-0 1783400000301-0
 ```
@@ -441,7 +451,7 @@ XACK orders g:payment 1783400000300-0 1783400000301-0
 
 ## 9. Delivery semantics: at-least-once, poison message và dead-letter
 
-Streams + consumer group mặc định cho semantics **at-least-once**:
+Streams + consumer group mặc định cho semantics **at-least-once** (xử lý ít nhất một lần; có thể trùng nếu crash/retry):
 
 ```diagram
 1. Worker nhận e1 → Redis đưa e1 vào PEL
@@ -451,13 +461,13 @@ Streams + consumer group mặc định cho semantics **at-least-once**:
 5. e1 được xử lý lần nữa
 ```
 
-Kết luận: consumer phải **idempotent**.
+Kết luận: consumer phải **idempotent** (xử lý lặp lại cùng một message không tạo side effect sai).
 
 | Semantics | Cách đạt trong Redis Stream | Trade-off |
 |-----------|-----------------------------|-----------|
 | At-least-once | XREADGROUP → xử lý → XACK | Có thể xử lý trùng |
-| At-most-once | XACK trước hoặc ngay khi nhận | Crash sau ack thì mất message |
-| Exactly-once | Không có native end-to-end | Cần idempotency key/transaction ở downstream |
+| At-most-once (tối đa một lần; có thể mất) | XACK trước hoặc ngay khi nhận | Crash sau ack thì mất message |
+| Exactly-once (đúng một lần end-to-end) | Không có native end-to-end | Cần idempotency key/transaction ở downstream |
 
 ### 9.1. Detect poison message bằng delivery count
 
@@ -529,9 +539,9 @@ XSETID orders 1783400009999-0
 | Ack/retry | `XACK`, PEL, `XCLAIM` | Không | Tự chế bằng `LMOVE`/processing list | Offset commit/rebalance |
 | Ordering | Toàn stream/key | Theo publish realtime | Toàn list | Trong partition |
 | Fan-out nhiều service | Mỗi service một group | Subscriber online đều nhận | Phải copy sang nhiều list | Mỗi group nhận đủ |
-| Backpressure | Stream dài ra, pending/lag tăng | Không lưu → drop với offline | List dài ra | Lag theo partition |
+| Backpressure (downstream chậm làm backlog dồn lại) | Stream dài ra, pending/lag tăng | Không lưu → drop với offline | List dài ra | Lag theo partition |
 | Retention | `MAXLEN`, `MINID`, `XTRIM` | Không có | `LTRIM` thủ công | Time/size retention |
-| Scale ngang ghi | Shard nhiều stream/key; trong [Cluster](./cluster.md) 1 key thuộc 1 slot | Tốt cho broadcast nhẹ | Shard nhiều list | Partition là core design |
+| Scale ngang ghi | Shard nhiều stream/key; trong [Cluster](./cluster.md) 1 key thuộc 1 hash slot (đơn vị phân vùng key trong Redis Cluster) | Tốt cho broadcast nhẹ | Shard nhiều list | Partition là core design |
 | Durability mạnh | Phụ thuộc Redis AOF/RDB/replica | Không | Phụ thuộc Redis | Thiết kế cho durable distributed log |
 | Độ phức tạp vận hành | Thấp nếu đã có Redis | Thấp nhất | Thấp | Cao hơn đáng kể |
 | Khi chọn | Reliable queue/event log trong Redis | Realtime notify mất được | Queue đơn giản 1 nhóm worker | Event backbone TB/ngày, retention dài |
@@ -546,6 +556,14 @@ Cần message còn lại khi consumer offline?
    ├─ Chỉ một hàng đợi đơn giản, pop là xong? → List
    └─ Cần partition distributed, retention TB, ecosystem connector? → Kafka
 ```
+
+### Khi nào KHÔNG nên dùng Streams
+
+- Chỉ cần realtime notify mất-được → dùng [Pub/Sub](./pub-sub.md).
+- Queue cực đơn giản, một nhóm worker, pop-là-xong → dùng [List](./lists.md).
+- Cần log distributed nhiều TB, retention dài, connector ecosystem → dùng Kafka.
+- Message rất lớn → lưu blob ngoài, Stream chỉ giữ reference.
+- Không cần replay/ack/group → Stream là overkill, tốn thêm RAM và ops.
 
 ---
 

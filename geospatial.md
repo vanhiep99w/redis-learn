@@ -34,7 +34,7 @@ GEOSEARCH drivers FROMLONLAT 106.63 10.82 BYRADIUS 3 km ASC COUNT 10 WITHDIST
 
 Điều thú vị là Redis không hề có một cấu trúc "bản đồ" riêng. Geo thực chất chỉ là **một lớp mỏng phủ lên [Sorted Set](./sorted-sets.md)**: tọa độ hai chiều được mã hóa thành một con số duy nhất làm score. Đó cũng là câu hỏi mở đầu thú vị nhất của doc này — làm sao nhét được **hai chiều** kinh độ/vĩ độ vào **một** score mà vẫn giữ được tính chất "gần nhau ngoài thực tế thì gần nhau trong dữ liệu"?
 
-Từ mẹo mã hóa đó (geohash và bit-interleaving), doc sẽ đi tiếp tới cách `GEOSEARCH` quét vùng, những giới hạn của Redis Geo, cách shard theo thành phố, và khi nào nên chuyển sang PostGIS hay Elasticsearch.
+Từ mẹo mã hóa đó — **geohash** (mã hóa tọa độ thành chuỗi/số theo ô địa lý) và **bit-interleaving** (đan xen bit longitude/latitude) — doc sẽ đi tiếp tới cách `GEOSEARCH` quét vùng, những giới hạn của Redis Geo, cách shard theo thành phố, và khi nào nên chuyển sang PostGIS hay Elasticsearch.
 
 ---
 
@@ -65,7 +65,7 @@ Không có “geo tree” riêng. Không có R-tree. Không có per-member metad
 | `ZRANGE key ... WITHSCORES` | thấy raw geohash score |
 
 > [!TIP]
-> Aha quan trọng nhất: **mọi thứ bạn biết về Sorted Set vẫn áp dụng** — memory, O(log N), big key, single-threaded blocking, cluster slot, `ZREM`, `ZCARD`, `ZSCAN`, `ZRANGE`.
+> Aha quan trọng nhất: **mọi thứ bạn biết về Sorted Set vẫn áp dụng** — memory, O(log N) (chi phí tăng theo logarit số phần tử), big key (một key quá lớn gây nặng memory/latency), single-threaded blocking (Redis xử lý command trên một luồng chính nên command nặng làm lệnh khác chờ), hash slot (ô phân vùng mà Redis Cluster dùng để gán key vào node), `ZREM`, `ZCARD`, `ZSCAN`, `ZRANGE`.
 
 Hệ quả thiết kế:
 
@@ -78,6 +78,8 @@ Hệ quả thiết kế:
 ## 3. Geohash 52-bit: biến bản đồ 2D thành một trục số
 
 ### 3.1. Vì sao cần bit-interleaving?
+
+Hãy tưởng tượng bạn cần xếp các địa điểm trên bản đồ vào một hàng duy nhất để Sorted Set có thể so sánh; bit-interleaving là cách “xen kẽ” hai tọa độ để hàng đó vẫn giữ được phần nào ý nghĩa gần-xa.
 
 Sorted Set cần một score tuyến tính:
 
@@ -95,7 +97,7 @@ latitude ↑
          └────────────────→ longitude
 ```
 
-Redis giải bằng **Geohash + Z-order/Morton code**: chia longitude và latitude thành bit, rồi đan xen chúng.
+Redis giải bằng **Geohash + Z-order/Morton code** (đường đi kiểu chữ Z, còn gọi là Morton code, để biến không gian 2D thành thứ tự 1D): chia longitude và latitude thành bit, rồi đan xen chúng.
 
 ```diagram
 Bước 1: Chuẩn hóa tọa độ
@@ -130,6 +132,8 @@ Bước 4: Lưu vào ZSet score
 
 ### 3.2. Tại sao điểm gần nhau có score gần nhau?
 
+Trực giác là: nếu hai điểm rơi vào cùng một khu phố trên bản đồ, ta muốn score của chúng cũng nằm gần nhau để Redis scan được bằng range.
+
 Z-order giữ được **locality tương đối**: các điểm chung prefix geohash dài thường nằm gần nhau trên bản đồ, nên chúng cũng nằm gần nhau trong zset score.
 
 ```text
@@ -149,7 +153,7 @@ Zoom sâu hơn:
 
 Điểm mạnh: range scan trên score có thể gom một vùng địa lý.
 
-Điểm yếu: **boundary problem**. Hai điểm cách nhau 5m nhưng nằm hai bên ranh giới ô geohash có thể có prefix khác nhau rất sớm.
+Điểm yếu: **boundary problem** (vấn đề ở ranh giới ô). Hai điểm cách nhau 5m nhưng nằm hai bên ranh giới ô geohash có thể có prefix khác nhau rất sớm.
 
 ```text
 ┌─────────────┬─────────────┐
@@ -239,7 +243,9 @@ Ví dụ “tìm 10 tài xế gần nhất để gán đơn” → **không dùn
 
 ## 5. GEOSEARCH chạy bên trong như thế nào
 
-Redis docs mô tả complexity `O(N + log(M))`: `N` là số phần tử trong vùng bounding box theo grid, `M` là số phần tử thật sự nằm trong shape.
+Redis docs mô tả complexity `O(N + log(M))`: `N` là số phần tử trong vùng **bounding box** (hình chữ nhật bao ngoài radius/box cần tìm) theo grid, `M` là số phần tử thật sự nằm trong shape.
+
+Nói đời thường, `GEOSEARCH` không “nhìn quanh” từng điểm trên toàn bản đồ; nó khoanh một vùng ứng viên đủ rộng, lấy điểm trong vùng đó, rồi đo lại để loại điểm thừa.
 
 Quy trình tư duy:
 
@@ -273,7 +279,7 @@ Step 6 — Sort/COUNT
   ASC/DESC nếu cần, rồi cắt COUNT.
 ```
 
-Tại sao phải 9 ô? Vì boundary problem. Nếu user đứng sát ranh giới ô, điểm gần nhất có thể nằm ở ô bên cạnh.
+Tại sao phải 9 ô? Đây là cách Redis tránh bỏ sót hàng xóm đứng ngay bên kia vạch kẻ ô. Vì boundary problem, nếu user đứng sát ranh giới ô, điểm gần nhất có thể nằm ở ô bên cạnh.
 
 ```text
 Không scan neighbor:
@@ -294,7 +300,7 @@ Scan 1 + 8 area:
 ```
 
 > [!NOTE]
-> Geo search không tỷ lệ trực tiếp với tổng số member trong key nếu radius nhỏ. Nó tỷ lệ với **mật độ điểm trong vùng bounding grid**. Nhưng radius lớn ở khu đông điểm sẽ làm query nặng và có thể block event loop Redis.
+> Geo search không tỷ lệ trực tiếp với tổng số member trong key nếu radius nhỏ. Nó tỷ lệ với **mật độ điểm trong vùng bounding grid**. Nhưng radius lớn ở khu đông điểm sẽ làm query nặng và có thể block event loop Redis (vòng xử lý command chính của Redis).
 
 ---
 
@@ -432,6 +438,13 @@ SET hb:{hcm}:driver:88 1 EX 15
 
 ## 10. Giới hạn: Redis Geo không phải GIS
 
+### Khi nào KHÔNG nên dùng Redis Geo
+
+- Cần polygon/geofence phức tạp, spatial join, routing, projection → dùng PostGIS/Elasticsearch/RediSearch.
+- Cần search kết hợp text + thuộc tính + geo → dùng RediSearch/Elasticsearch thay vì tự lọc quá nhiều ở app.
+- Cần độ chính xác trắc địa hoặc billing theo khoảng cách → dùng GIS chuyên dụng.
+- Dồn dữ liệu vào một key toàn cầu (big key, single slot) → shard theo city/region/grid trước khi dùng Geo.
+
 | Giới hạn | Chi tiết | Khi nào đau? | Hướng đi |
 |----------|----------|--------------|----------|
 | Chỉ index **point** | không polygon, line, multipolygon | vùng giao hàng theo biên phường/quận | PostGIS hoặc app-side polygon check sau Geo |
@@ -559,7 +572,7 @@ ZSCAN places 0 MATCH "st:hcm-*"
 
 ### 3 nguyên tắc nhớ lâu
 
-1. **Geo là Sorted Set.** Hiểu zset là hiểu 70% Redis Geo: score, member, O(log N), big key, `ZREM`, cluster slot.
+1. **Geo là Sorted Set.** Hiểu zset là hiểu 70% Redis Geo: score, member, O(log N), big key, `ZREM`, hash slot.
 2. **Radius nhỏ, key nhỏ, output nhỏ.** Hiệu năng đến từ việc giảm candidate và response, không phải từ niềm tin rằng “Redis luôn nhanh”.
 3. **Dùng đúng công cụ.** Redis Geo cho điểm gần nhau; PostGIS/Elasticsearch/RediSearch cho GIS/search phức tạp.
 

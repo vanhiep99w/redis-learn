@@ -76,7 +76,7 @@ key ──▶ redisObject(type=string)
 
 ### 4.1 Vì sao Redis không dùng C string?
 
-C string chỉ biết kết thúc bằng `\0`, nên muốn biết length phải scan O(N) và không lưu binary an toàn. Redis cần `STRLEN` O(1), `APPEND` nhanh, và value có thể chứa byte bất kỳ. Vì vậy Redis dùng **SDS**:
+SDS là lớp “vỏ” mà Redis dùng để biến một mảng byte thô thành String có metadata rõ ràng: biết dài bao nhiêu, còn dư bao nhiêu chỗ, và vẫn chứa được mọi byte. C string chỉ biết kết thúc bằng `\0`, nên muốn biết length phải scan O(N) và không lưu binary an toàn. Redis cần `STRLEN` O(1), `APPEND` nhanh, và value có thể chứa byte bất kỳ. Vì vậy Redis dùng **SDS**:
 
 ```diagram
 ┌────────────── SDS header ──────────────┐┌──────────── buf ────────────┐
@@ -101,9 +101,9 @@ C string chỉ biết kết thúc bằng `\0`, nên muốn biết length phải 
 > [!IMPORTANT]
 > SDS có `len`, nhưng vẫn giữ byte `\0` cuối buffer để tiện gọi hàm C/debug. Byte này **không** quyết định length.
 
-### 4.2 APPEND pre-allocation: vì sao O(1) amortized?
+### 4.2 APPEND pre-allocation: vì sao O(1) amortized (chi phí trung bình khi trải đều nhiều lần)?
 
-Khi `APPEND` làm `len` vượt `alloc`, SDS cấp phát dư:
+Pre-allocation là mẹo “xin dư bộ nhớ một chút” để những lần append kế tiếp không phải đi xin lại liên tục. Khi `APPEND` làm `len` vượt `alloc`, SDS cấp phát dư:
 
 1. Nếu size mới < 1MB → cấp phát khoảng **gấp đôi** size mới.
 2. Nếu size mới ≥ 1MB → cấp phát thêm **1MB** free space, tránh nhân đôi quá lãng phí.
@@ -127,9 +127,11 @@ Nếu append từng byte 1 triệu lần, Redis không realloc 1 triệu lần. 
 
 ## 5. Bên trong: 3 encoding int / embstr / raw
 
+Encoding là cách Redis chọn hình dạng lưu trữ vật lý cho cùng một kiểu dữ liệu String. Nhìn từ client vẫn là `SET`/`GET`, nhưng bên trong Redis có thể lưu số nguyên, String nhỏ gọn, hoặc String lớn theo ba cách khác nhau để cân bằng RAM và CPU.
+
 | Encoding | Điều kiện | Memory/CPU | Chuyển đổi |
 |----------|-----------|------------|------------|
-| `int` | Value parse được thành số nguyên 64-bit | Không cấp phát SDS cho value; số `0–9999` thường dùng **shared integers** | `APPEND`, `SETRANGE`, `INCRBYFLOAT` có thể chuyển sang string |
+| `int` | Value parse được thành số nguyên 64-bit | Không cấp phát SDS cho value; số `0–9999` thường dùng **shared integers** (các object số nguyên nhỏ được Redis dùng chung để tiết kiệm RAM) | `APPEND`, `SETRANGE`, `INCRBYFLOAT` có thể chuyển sang string |
 | `embstr` | String không phải số, dài **≤ 44 bytes** | `redisObject` + SDS trong **1 malloc**, cache locality tốt | **Read-only**: modify là chuyển sang `raw` |
 | `raw` | > 44 bytes hoặc `embstr` bị modify | `redisObject` và SDS là **2 malloc** | Mutable, dùng cho value lớn |
 
@@ -141,7 +143,7 @@ APPEND s "!"         # OBJECT ENCODING s → "raw"
 
 ### 5.1 “Aha”: con số 44 byte từ đâu ra?
 
-Redis muốn nhét object nhỏ vào allocator class **64 bytes**:
+Ngưỡng 44 byte không phải con số ngẫu nhiên; nó đến từ cách Redis cố nhét object nhỏ vào một ô cấp phát vừa đẹp để giảm overhead. Cụ thể, Redis muốn nhét object nhỏ vào allocator class (nhóm kích thước bộ nhớ mà bộ cấp phát dùng để cấp phát/tái sử dụng block) **64 bytes**:
 
 ```diagram
 64-byte allocation
@@ -157,7 +159,7 @@ Redis muốn nhét object nhỏ vào allocator class **64 bytes**:
 
 ### 5.2 MEMORY USAGE mẫu
 
-Số liệu thay đổi theo Redis version, jemalloc, độ dài key; bảng dưới là kiểu kết quả thường gặp để thấy xu hướng:
+Các con số dưới đây không phải “hằng số” để thuộc lòng, mà là cách đọc xu hướng: phần overhead có thể lớn hơn payload khi value nhỏ, còn value lớn thì payload chiếm chính. Số liệu thay đổi theo Redis version, jemalloc, độ dài key; bảng dưới là kiểu kết quả thường gặp để thấy xu hướng:
 
 | Value | Encoding | `MEMORY USAGE` xấp xỉ | Bình luận |
 |-------|----------|-----------------------|-----------|
@@ -200,7 +202,7 @@ INCRBY pageviews 10   # 11
 INCR notanumber       # ERR value is not an integer
 ```
 
-Redis xử lý command trong event loop single-threaded (xem [Redis Overview](./redis-overview.md)):
+Redis xử lý command trong event loop single-threaded (một vòng lặp xử lý lệnh chính chạy tuần tự trên một thread, xem [Redis Overview](./redis-overview.md)):
 
 ```diagram
 Client A: INCR counter ─┐
@@ -518,6 +520,14 @@ Bạn có dữ liệu gì?
 ├─ Cờ true/false theo id? ────────────────▶ Bitmap
 └─ Đếm unique xấp xỉ? ────────────────────▶ HyperLogLog
 ```
+
+### Khi nào KHÔNG nên dùng String
+
+- Object có nhiều field hoặc thường update lẻ từng field → dùng Hash để tránh rewrite cả blob.
+- Cần ordered append/pop, queue, log tiêu thụ dần → dùng List hoặc Stream.
+- Cần đếm unique trên tập rất lớn với sai số chấp nhận được → dùng HyperLogLog.
+- Cần ranking, top-N, range query theo score → dùng Sorted Set.
+- Value quá lớn hoặc hot khiến network/copy/event loop bị nghẽn → tách nhỏ, nén, hoặc đưa blob sang storage phù hợp hơn.
 
 ---
 

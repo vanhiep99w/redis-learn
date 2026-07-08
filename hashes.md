@@ -37,7 +37,7 @@ HMGET sess:tok_9f2a uid role         # lấy đúng 2 field cần
 HINCRBY sess:tok_9f2a login_count 1  # tăng một field, atomic
 ```
 
-Nhưng Hash không phải lúc nào cũng thắng String JSON, và bản thân nó cũng có cạm bẫy riêng (`HGETALL` trên hash lớn, big key khó shard). Doc này sẽ trả lời: Hash lưu trong memory thế nào (listpack và hashtable), khi nào nên chọn Hash thay vì JSON, vì sao hash nhỏ tiết kiệm memory đến mức Instagram từng dùng để nén hàng trăm triệu cặp key-value, và field-level TTL (Redis 7.4+) mở ra những gì.
+Nhưng Hash không phải lúc nào cũng thắng String JSON, và bản thân nó cũng có cạm bẫy riêng (`HGETALL` trên hash lớn, big key — một key chứa quá nhiều dữ liệu nên khó shard/migrate và dễ gây latency spike). Doc này sẽ trả lời: Hash lưu trong memory thế nào (listpack và hashtable), khi nào nên chọn Hash thay vì JSON, vì sao hash nhỏ tiết kiệm memory đến mức Instagram từng dùng để nén hàng trăm triệu cặp key-value, và field-level TTL (Redis 7.4+) mở ra những gì.
 
 ---
 
@@ -85,7 +85,7 @@ Redis Hash có 2 encoding chính:
 
 | Encoding | Khi nào dùng | Cấu trúc | Điểm mạnh | Điểm yếu |
 |----------|--------------|----------|-----------|----------|
-| `listpack` | Số field ≤ `hash-max-listpack-entries` (**128**) và mọi field/value ≤ `hash-max-listpack-value` (**64 bytes**) | field/value xen kẽ trong một khối memory liên tục | Rất tiết kiệm memory, cache locality tốt | Tìm field O(N) |
+| `listpack` | Số field ≤ `hash-max-listpack-entries` (**128**) và mọi field/value ≤ `hash-max-listpack-value` (**64 bytes**) | field/value xen kẽ trong một khối memory liên tục | Rất tiết kiệm memory, cache locality (dữ liệu nằm gần nhau nên CPU cache đọc hiệu quả) tốt | Tìm field O(N) |
 | `hashtable` | Vượt một trong hai ngưỡng | `dict` thật, tương tự keyspace chính | Lookup/update O(1) trung bình | Nhiều pointer/metadata hơn |
 
 Các tên config cũ `hash-max-ziplist-entries` và `hash-max-ziplist-value` là alias lịch sử. Redis hiện dùng `listpack`, không còn ziplist cho Hash mới.
@@ -100,7 +100,7 @@ hash-max-listpack-value 64
 
 ### 3.1. listpack — vì sao O(N) vẫn nhanh?
 
-Nhìn qua, O(N) nghe đáng sợ. Nhưng N mặc định chỉ tối đa 128 field, và listpack nằm trong một vùng memory liên tục:
+Listpack là cách Redis “đóng gói” Hash nhỏ như một mảng field/value liền nhau để tiết kiệm overhead. Nhìn qua, O(N) nghe đáng sợ. Nhưng N mặc định chỉ tối đa 128 field, và listpack nằm trong một vùng memory liên tục:
 
 ```diagram
 Bước 1: Redis đọc pointer tới value object của key "user:42"
@@ -131,7 +131,7 @@ Vì sao nhanh trong thực tế?
 
 ### 3.2. hashtable — khi Hash lớn
 
-Khi vượt ngưỡng, Redis chuyển Hash thành `dict`:
+Hashtable là chế độ Redis dùng khi Hash đã đủ lớn để scan tuyến tính không còn là lựa chọn tốt. Khi vượt ngưỡng, Redis chuyển Hash thành `dict`:
 
 ```diagram
 hash object
@@ -149,12 +149,12 @@ Nhưng hashtable tốn memory hơn vì mỗi field/value có thêm:
 
 - `dictEntry` metadata.
 - Pointer tới key field và value.
-- SDS header cho string.
-- Bucket array có slot trống để giữ load factor hợp lý.
+- SDS (Simple Dynamic String — cấu trúc string nội bộ của Redis, lưu kèm length/alloc) header cho string.
+- Bucket array có slot trống để giữ load factor (tỷ lệ số entry trên số bucket, ảnh hưởng trực tiếp tới collision/resize) hợp lý.
 
 ### 3.3. Incremental rehashing — resize không “đứng hình”
 
-Redis dict không resize bằng cách dời toàn bộ bucket trong một cú. Khi cần mở rộng/thu nhỏ, Redis giữ **2 hash table** (`ht[0]` cũ, `ht[1]` mới) và mỗi command làm một phần `rehashstep()`.
+Incremental rehashing là cách Redis resize từ từ để không bắt một command gánh toàn bộ chi phí di chuyển bucket. Redis dict không resize bằng cách dời toàn bộ bucket trong một cú. Khi cần mở rộng/thu nhỏ, Redis giữ **2 hash table** (`ht[0]` cũ, `ht[1]` mới) và mỗi command làm một phần `rehashstep()`.
 
 ```diagram
 ht[0] size=1024, used=1024          → bảng cũ
@@ -206,7 +206,7 @@ OBJECT ENCODING h                 # vẫn "hashtable"
 | `HINCRBY key f delta` | O(1) | `HINCRBY user:42 logins 1` | Field missing được coi là 0 |
 | `HINCRBYFLOAT key f delta` | O(1) | `HINCRBYFLOAT stats spend 0.35` | Floating point string representation |
 
-`HINCRBY` là lý do Hash rất hợp cho counters theo entity. Với String JSON, bạn phải `GET` → parse → tăng → `SET`; muốn atomic phải dùng Lua hoặc transaction với optimistic locking. Với Hash, Redis làm trong một command single-thread.
+`HINCRBY` là lý do Hash rất hợp cho counters theo entity. Với String JSON, bạn phải `GET` → parse → tăng → `SET`; muốn atomic phải dùng Lua hoặc transaction với optimistic locking. Với Hash, Redis làm trong một command single-thread (một command chạy trọn vẹn trong luồng xử lý chính, nên không bị client khác chen ngang; xem [Redis Overview](./redis-overview.md)).
 
 ### 4.3. Nhóm “đọc toàn bộ” — tiện nhưng dễ thành bom
 
@@ -219,7 +219,7 @@ OBJECT ENCODING h                 # vẫn "hashtable"
 | `HSCAN key cursor [MATCH pattern] [COUNT n] [NOVALUES]` | O(1) mỗi call, O(N) cả vòng | Duyệt Hash lớn từng phần | Không đảm bảo snapshot nhất quán |
 
 > [!IMPORTANT]
-> `HGETALL` trên Hash 100K field là cùng họ lỗi với `KEYS *`: Redis phải đọc toàn bộ, encode reply khổng lồ, ghi ra socket, và trong lúc đó event loop bị giữ lâu. Hash lớn → dùng `HSCAN` hoặc `HMGET` đúng field cần.
+> `HGETALL` trên Hash 100K field là cùng họ lỗi với `KEYS *`: Redis phải đọc toàn bộ, encode reply khổng lồ, ghi ra socket, và trong lúc đó event loop (vòng xử lý request chính của Redis trong mô hình single-threaded; xem [Redis Overview](./redis-overview.md)) bị giữ lâu. Hash lớn → dùng `HSCAN` hoặc `HMGET` đúng field cần.
 
 `HSCAN` mẫu:
 
@@ -343,6 +343,14 @@ Hai command sửa hai field khác nhau, không ghi đè toàn object.
 | Cần nested array/object sâu? | Có | String JSON hoặc RedisJSON |
 | Cần range/sort/filter theo field? | Có | Không phải Hash đơn thuần; dùng ZSET/Search/DB |
 | Cần TTL riêng cho từng attribute? | Redis 7.4+ | Hash với HFE |
+
+### Khi nào KHÔNG nên dùng Hash
+
+- **Luôn đọc/ghi nguyên object nested** → dùng String JSON hoặc RedisJSON để giữ cấu trúc object tự nhiên hơn.
+- **Cần ranking/range/sort theo score** → dùng Sorted Set thay vì cố nhét score vào field rồi tự scan.
+- **Chỉ cần membership đơn thuần** → dùng Set; Hash thêm value không cần thiết sẽ làm model rối hơn.
+- **Một Hash phình vô hạn hoặc làm global namespace** → bucket hoặc shard theo entity/ngày/range để tránh big key.
+- **Cần query theo giá trị field** như `plan = pro` hoặc `status = active` → dùng RediSearch hoặc database có index/query phù hợp.
 
 ---
 

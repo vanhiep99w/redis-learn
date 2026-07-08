@@ -60,8 +60,8 @@ Ba đại lượng vận hành cần đặt lên bàn cân:
 | Đại lượng | Câu hỏi | Ảnh hưởng bởi |
 |-----------|---------|---------------|
 | **RPO** (mất bao nhiêu) | Crash mất tối đa bao nhiêu dữ liệu? | RDB save point, `appendfsync` |
-| **RTO** (bao lâu để trở lại) | Restart/khôi phục mất bao lâu? | Kích thước dataset, RDB vs AOF replay |
-| **Overhead** | Persistence ngốn bao nhiêu I/O/RAM/latency? | fsync policy, fork/CoW, disk speed |
+| **RTO** (Recovery Time Objective — bao lâu để trở lại) | Restart/khôi phục mất bao lâu? | Kích thước dataset, RDB vs AOF replay |
+| **Overhead** | Persistence ngốn bao nhiêu I/O/RAM/latency? | fsync policy, `fork()`/Copy-on-Write (CoW), disk speed |
 
 > [!IMPORTANT]
 > Đừng tối ưu một trục mà quên hai trục kia. `appendfsync always` cho RPO ~0 nhưng bóp nghẹt throughput (overhead cao). RDB thưa nhẹ nhàng nhưng RPO tệ. Chọn strategy = tìm điểm cân đối RPO/RTO/overhead **khớp với yêu cầu nghiệp vụ**, không phải cực đại hoá độ bền.
@@ -82,7 +82,7 @@ Tóm tắt lại hai cơ chế (chi tiết ở [RDB](./rdb.md) và [AOF](./aof.m
 | RAM (Copy-on-Write) | Lúc `BGSAVE` | Lúc rewrite |
 | Backup / clone | Lý tưởng (1 file) | Cồng kềnh |
 | Đọc được bằng mắt | Không (binary) | Có (RESP text) — audit thô |
-| Nền của replication | Có (full sync) | Không trực tiếp |
+| Nền của replication | Có (full sync — đồng bộ toàn bộ dataset cho replica) | Không trực tiếp |
 
 ```diagram
 RDB tối ưu: RTO (restart nhanh) + backup gọn + overhead thấp
@@ -184,7 +184,7 @@ Cách hybrid hoạt động khi khởi động:
 - Redis **load từ AOF** (mới hơn → RPO tốt).
 - RDB đóng vai **backup nhanh** (copy 1 file đi off-site) và **phương tiện full sync** cho [Replication](./replication.md).
 
-Cái giá phải trả: overhead của cả hai cộng lại. Bạn có `BGSAVE` fork (CoW) **và** AOF rewrite fork (CoW) **và** fsync liên tục. Vì vậy hybrid đòi hỏi chừa RAM và đĩa rộng rãi hơn.
+Cái giá phải trả không biến hybrid thành lựa chọn miễn phí: overhead của cả hai cộng lại. Bạn có `BGSAVE` fork (CoW) **và** AOF rewrite fork (CoW) **và** fsync liên tục. Vì vậy hybrid đòi hỏi chừa RAM và đĩa rộng rãi hơn.
 
 > [!TIP]
 > Nếu không chắc chọn gì cho một service quan trọng: bật **hybrid với `appendfsync everysec`**. Nó cho RPO ~1s, restart hợp lý, backup gọn — và bạn tinh chỉnh sau khi đo bằng [Benchmarking](./benchmarking.md).
@@ -218,7 +218,7 @@ Redis khởi động
 
 Đây là hiểu lầm nguy hiểm nhất về độ bền. "Tôi có 3 replica, dữ liệu chắc chắn an toàn" — **sai**.
 
-[Replication](./replication.md) là **asynchronous** mặc định: master trả lời client **trước khi** replica xác nhận. Nếu master crash ngay sau khi ack client nhưng trước khi lệnh tới replica → lệnh đó **mất**, dù có bao nhiêu replica.
+[Replication](./replication.md) là **async replication** / **asynchronous** mặc định: master trả lời client **trước khi** replica xác nhận. Nếu master crash ngay sau khi ack client nhưng trước khi lệnh tới replica → lệnh đó **mất**, dù có bao nhiêu replica.
 
 ```diagram
 Client ──SET──▶ Master ──(ack ngay)──▶ Client   ✅ "thành công"
@@ -228,7 +228,7 @@ Client ──SET──▶ Master ──(ack ngay)──▶ Client   ✅ "thành 
                 Replica lên làm master → KHÔNG có lệnh đó → MẤT
 ```
 
-Replication bảo vệ khỏi **mất một máy** (availability), không đảm bảo **không mất dữ liệu** (durability) và không thay thế backup.
+Vì vậy, replication bảo vệ khỏi **mất một máy** (availability), không đảm bảo **không mất dữ liệu** (durability) và không thay thế backup.
 
 | Cơ chế | Bảo vệ khỏi | KHÔNG bảo vệ khỏi |
 |--------|-------------|-------------------|
@@ -260,7 +260,7 @@ Dữ liệu Redis có warm lại được từ nơi khác (DB) không?
 │     │                                                     │
 │     └─ Cần tránh cold-start/stampede sau restart?         │
 │           ├─ Không quan trọng ─▶ Không persistence        │
-│           └─ Muốn warm sẵn    ─▶ RDB thua (save thưa)    │
+│           └─ Muốn warm sẵn    ─▶ RDB thưa (save thưa)    │
 │                                                           │
 └─ KHÔNG (Redis là nguồn sự thật, hoặc mất là mất thật) ───┤
       │                                                     │
@@ -455,7 +455,7 @@ Sau khi bật:
 □ Giám sát rdb_last_bgsave_status / aof_last_write_status
 □ Giám sát rdb_changes_since_last_save (RPO thực)
 □ Giám sát dung lượng đĩa (AOF + RDB tạm cùng lúc)
-□ Chừa RAM cho Copy-on-Write; tắt Transparent Huge Pages
+□ Chừa RAM cho Copy-on-Write; tắt Transparent Huge Pages (THP)
 □ Benchmark overhead trước khi lên production
 □ Diễn tập restore định kỳ (backup chưa test = chưa có backup)
 ```
