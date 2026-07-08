@@ -152,13 +152,18 @@ for (const [filename, meta] of fileMap) {
   console.log(`  ✓ ${filename} → ${meta.dir}/`);
 }
 
-// ── Step 4: Write meta.json per category for Fumadocs sidebar labels ──────────
+// ── Step 4: Write meta.json per category for Fumadocs sidebar labels/order ───
 
 for (const [sectionName, dir] of Object.entries(SECTION_TO_DIR)) {
   const categoryDir = join(docsBase, dir);
   if (existsSync(categoryDir)) {
+    const pages = [...fileMap.entries()]
+      .filter(([, meta]) => meta.category === sectionName)
+      .sort(([, a], [, b]) => a.order - b.order)
+      .map(([filename]) => basename(filename, '.md'));
+
     const metaPath = join(categoryDir, 'meta.json');
-    writeFileSync(metaPath, JSON.stringify({ title: sectionName }, null, 2), 'utf8');
+    writeFileSync(metaPath, JSON.stringify({ title: sectionName, pages }, null, 2), 'utf8');
   }
 }
 

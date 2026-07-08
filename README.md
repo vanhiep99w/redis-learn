@@ -11,10 +11,10 @@ Tài liệu học Redis tiếng Việt — Next.js + Fumadocs, deploy trên Clou
 ## Data Structures
 
 - [x] [Strings](strings.md) - GET/SET, INCR/DECR, TTL, bit operations, use cases counter và cache
+- [x] [Hashes](hashes.md) - HSET/HGETALL, object storage, field-level operations, memory efficiency
 - [x] [Lists](lists.md) - LPUSH/RPUSH, LRANGE, blocking operations (BLPOP), queue patterns
 - [x] [Sets](sets.md) - SADD/SMEMBERS, set operations (union, intersect, diff), random members
 - [x] [Sorted Sets](sorted-sets.md) - ZADD/ZRANGE, score-based ranking, leaderboard, range queries
-- [x] [Hashes](hashes.md) - HSET/HGETALL, object storage, field-level operations, memory efficiency
 - [x] [Streams](streams.md) - XADD/XREAD, consumer groups, event sourcing, so sánh với Kafka
 - [x] [Bitmaps & HyperLogLog](bitmaps-hyperloglog.md) - SETBIT/BITCOUNT, PFADD/PFCOUNT, đếm unique với memory tối thiểu
 - [x] [Geospatial](geospatial.md) - GEOADD/GEOSEARCH, tìm kiếm theo vị trí, radius queries
@@ -42,11 +42,11 @@ Tài liệu học Redis tiếng Việt — Next.js + Fumadocs, deploy trên Clou
 ## Patterns & Use Cases
 
 - [x] [Caching Patterns](caching-patterns.md) - Cache-aside, write-through, write-behind, cache stampede, TTL strategies
-- [x] [Distributed Lock](distributed-lock.md) - SET NX, lock expiry, Redlock algorithm, fencing tokens
-- [x] [Rate Limiting](rate-limiting.md) - Fixed window, sliding window, token bucket với Redis
-- [x] [Pub/Sub](pub-sub.md) - PUBLISH/SUBSCRIBE, pattern matching, so sánh với Streams, giới hạn
 - [x] [Session Store](session-store.md) - Lưu session với TTL, Spring Session, serialization
+- [x] [Rate Limiting](rate-limiting.md) - Fixed window, sliding window, token bucket với Redis
 - [x] [Leaderboard & Counting](leaderboard-counting.md) - Sorted set leaderboard, real-time ranking, counting patterns
+- [x] [Distributed Lock](distributed-lock.md) - SET NX, lock expiry, Redlock algorithm, fencing tokens
+- [x] [Pub/Sub](pub-sub.md) - PUBLISH/SUBSCRIBE, pattern matching, so sánh với Streams, giới hạn
 
 ## Advanced
 
