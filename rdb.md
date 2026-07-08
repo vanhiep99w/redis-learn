@@ -233,20 +233,20 @@ RDB là binary format được thiết kế để **compact và load nhanh**, kh
 
 ```diagram
 ┌──────────────────────── dump.rdb ────────────────────────┐
-│ "REDIS"          magic string (5 byte)                    │
-│ "0011"           version number RDB (4 byte)              │
+│ "REDIS"          magic string (5 byte)                   │
+│ "0011"           version number RDB (4 byte)             │
 │ ── AUX fields ── metadata: redis-ver, redis-bits, ctime  │
-│ ── SELECTDB 0 ── đánh dấu database index                  │
+│ ── SELECTDB 0 ── đánh dấu database index                 │
 │ ── RESIZEDB ──── hint số key + số key có TTL (pre-alloc) │
-│ ┌─────────────────────────────────────────────────────┐ │
-│ │ [expire?] [type] [key] [value]                       │ │
-│ │ [expire?] [type] [key] [value]                       │ │  ← từng cặp
-│ │ ...                                                   │ │
-│ └─────────────────────────────────────────────────────┘ │
+│ ┌─────────────────────────────────────────────────────┐  │
+│ │ [expire?] [type] [key] [value]                      │  │
+│ │ [expire?] [type] [key] [value]                      │  │  ← từng cặp
+│ │ ...                                                 │  │
+│ └─────────────────────────────────────────────────────┘  │
 │ ── SELECTDB 1 ── (nếu dùng nhiều DB)                     │
 │ ── EOF ──────── opcode kết thúc                          │
-│ CRC64            checksum 8 byte toàn file                │
-└───────────────────────────────────────────────────────────┘
+│ CRC64            checksum 8 byte toàn file               │
+└──────────────────────────────────────────────────────────┘
 ```
 
 Vài điểm đáng nhớ:

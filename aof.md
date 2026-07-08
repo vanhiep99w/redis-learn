@@ -99,7 +99,7 @@ Client: SET balance 1000
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ (1) Thực thi trong memory  → dataset đổi ngay                │
+│ (1) Thực thi trong memory  → dataset đổi ngay               │
 └─────────────────────────────────────────────────────────────┘
         │
         ▼

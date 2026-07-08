@@ -174,8 +174,8 @@ Mạnh:   │ restart nhanh    │        │ RPO ~1s          │
 Yếu:    │ RPO vài phút     │        │ file lớn         │
         │ mất nhiều        │        │ restart chậm hơn │
         └────────┬─────────┘        └────────┬─────────┘
-                 │                            │
-                 └───────── HYBRID ───────────┘
+                 │                           │
+                 └───────── HYBRID ──────────┘
               lấy điểm mạnh của cả hai, bù điểm yếu
 ```
 
@@ -256,13 +256,13 @@ Ba lớp phòng thủ độc lập — CẦN CẢ BA cho dữ liệu quan trọn
 ```diagram
 Dữ liệu Redis có warm lại được từ nơi khác (DB) không?
 │
-├─ CÓ (cache thuần) ──────────────────────────────────────┐
+├─ CÓ (cache thuần) ────────────────────────────────────────┐
 │     │                                                     │
 │     └─ Cần tránh cold-start/stampede sau restart?         │
 │           ├─ Không quan trọng ─▶ Không persistence        │
-│           └─ Muốn warm sẵn    ─▶ RDB thưa (save thưa)    │
+│           └─ Muốn warm sẵn    ─▶ RDB thưa (save thưa)     │
 │                                                           │
-└─ KHÔNG (Redis là nguồn sự thật, hoặc mất là mất thật) ───┤
+└─ KHÔNG (Redis là nguồn sự thật, hoặc mất là mất thật) ────┤
       │                                                     │
       └─ Chấp nhận mất bao nhiêu khi crash?                 │
             ├─ Vài phút OK        ─▶ RDB thuần              │
@@ -481,17 +481,17 @@ Sau khi bật:
 
 ```diagram
 ┌──────────────── Redis Persistence Strategy cheat sheet ─────────────────┐
-│ Bắt đầu từ RPO: "crash mất bao nhiêu là chấp nhận được?"               │
+│ Bắt đầu từ RPO: "crash mất bao nhiêu là chấp nhận được?"                │
 │                                                                         │
 │ Cache warm-lại-được   → no persistence / RDB thưa                       │
-│ Chịu mất vài phút     → RDB thuần (restart nhanh, backup gọn)          │
-│ Mất tối đa ~1 giây    → HYBRID: AOF everysec + RDB   ◀── mặc định tốt  │
-│ Gần như mất 0         → AOF always (NVMe) + repl + backup off-site     │
+│ Chịu mất vài phút     → RDB thuần (restart nhanh, backup gọn)           │
+│ Mất tối đa ~1 giây    → HYBRID: AOF everysec + RDB   ◀── mặc định tốt   │
+│ Gần như mất 0         → AOF always (NVMe) + repl + backup off-site      │
 │                                                                         │
-│ Khởi động: bật AOF → load AOF (bỏ RDB). Nhớ khi restore!              │
-│ Replication ≠ persistence ≠ backup — CẦN CẢ BA lớp                     │
-│ Hybrid: fork BGSAVE + fork rewrite + fsync → chừa RAM & đĩa            │
-│ Tắt THP. Giám sát RPO thực. Diễn tập restore.                          │
+│ Khởi động: bật AOF → load AOF (bỏ RDB). Nhớ khi restore!                │
+│ Replication ≠ persistence ≠ backup — CẦN CẢ BA lớp                      │
+│ Hybrid: fork BGSAVE + fork rewrite + fsync → chừa RAM & đĩa             │
+│ Tắt THP. Giám sát RPO thực. Diễn tập restore.                           │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
