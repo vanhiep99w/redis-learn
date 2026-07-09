@@ -19,19 +19,17 @@
 
 ## Tổng quan
 
-**Redis** là một **in-memory data structure store**: dữ liệu được tổ chức theo dạng key-value, nhưng value không chỉ là chuỗi bytes đơn giản mà có thể là các cấu trúc dữ liệu giàu ngữ nghĩa như String, Hash, List, Set, Sorted Set, Stream, Bitmap, HyperLogLog và Geospatial index.
+Một query database quan hệ thường tốn vài đến vài chục millisecond; dưới traffic cao, session check, counter, cache product hay rate limit lặp lại hàng nghìn lần/giây sẽ đè DB. Redis xuất hiện để giữ **cấu trúc dữ liệu thao tác được ngay trong RAM**, latency micro-giây, command atomic — không chỉ “nhét JSON vào Map”.
 
-Redis thường được dùng làm:
+**Redis** là một **in-memory data structure store**: dữ liệu theo dạng key-value, nhưng value có thể là String, Hash, List, Set, Sorted Set, Stream, Bitmap, HyperLogLog, Geospatial… — không chỉ blob bytes.
 
-- Cache tốc độ cao.
-- Session store.
-- Rate limiter.
-- Counter và realtime metrics.
-- Leaderboard.
-- Queue hoặc stream processing nhẹ.
-- Pub/Sub message broker.
-- Distributed lock.
-- Metadata store latency thấp.
+Các nhóm việc hay gặp (chi tiết ở section use cases bên dưới):
+
+| Nhóm | Ví dụ |
+|------|--------|
+| Cache & session | Product cache, session store, feature flag |
+| Realtime state | Counter, leaderboard, rate limit |
+| Coordination | Distributed lock, lightweight queue/stream, Pub/Sub |
 
 Điểm cần nhớ ngay từ đầu:
 
@@ -424,6 +422,16 @@ Gợi ý cụ thể:
 4. Đọc lần lượt Data Structures: [Strings](./strings.md), [Hashes](./hashes.md), [Lists](./lists.md), [Sets](./sets.md), [Sorted Sets](./sorted-sets.md), [Streams](./streams.md).
 5. Đọc Persistence và HA nếu Redis giữ dữ liệu quan trọng.
 6. Đọc Performance/Operations trước khi deploy production.
+
+### 5 ý nhớ lâu
+
+1. **Redis = data structures + RAM + network server**, không chỉ cache Map.
+2. **Command chạy tuần tự trên một execution path** — atomic từng lệnh, nhưng lệnh chậm làm chậm mọi client.
+3. **Truy cập theo key**, không phải SQL ad-hoc; model dữ liệu phải khớp access pattern.
+4. **RAM + persistence là trade-off**: mất điện / restart / RPO phụ thuộc RDB/AOF/replica, không “tự an toàn”.
+5. **Big key, hot key, TTL sai, pool sai** thường phá production hơn “Redis chậm”.
+
+Chi tiết event loop, command lifecycle, expire engine → [Redis Architecture](./redis-architecture.md).
 
 ---
 

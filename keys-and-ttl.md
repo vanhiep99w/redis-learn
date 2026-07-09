@@ -28,15 +28,20 @@
 
 ## Tổng quan
 
-Trong Redis, **key design** là nền tảng của gần như mọi thứ:
+Incident hay gặp: cache “phình” vì `SET product:1 ...` ghi đè làm **mất TTL**; hoặc một key session JSON phình + `KEYS user:*` lúc debug làm p99 nhảy. Trong Redis, **key design + TTL** là nền tảng của gần như mọi thứ — không chỉ “đặt tên cho đẹp”.
 
-- Performance.
-- Memory usage.
-- TTL behavior.
-- Debuggability.
-- Cache correctness.
-- Cluster sharding.
-- Operational safety.
+Ba pha của doc này:
+
+| Pha | Nội dung |
+|-----|----------|
+| **A. Key design** | Key là gì, naming, length, namespace |
+| **B. TTL engine & cache design** | Commands, lazy/active expire, `SET` mất TTL, jitter/stampede |
+| **C. Operational hazards** | Hot key, big key, SCAN, Cluster hash tags |
+
+Ảnh hưởng trực tiếp:
+
+- Performance, memory, TTL correctness.
+- Debuggability, Cluster sharding, operational safety.
 
 Redis nhìn bên ngoài giống key-value store đơn giản:
 
@@ -400,57 +405,52 @@ Dùng cho lock/idempotency/rate limit tùy pattern.
 
 Redis không có một timer riêng cho từng key. Nếu có 100 triệu key TTL, tạo 100 triệu timer sẽ rất tốn.
 
-Redis dùng hai cơ chế:
+Hai cấu trúc liên quan (process model đầy đủ hơn ở [Redis Architecture](./redis-architecture.md)):
 
-1. Lazy expiration.
-2. Active expiration.
+```text
+keyspace dict ──▶ key → value (redisObject)
+expires dict  ──▶ key → expire_at (ms absolute)
+```
+
+Hai cơ chế dọn:
+
+1. **Lazy expiration** — check khi đụng key.
+2. **Active expiration** — `serverCron` ~**10Hz** lấy mẫu trong time budget.
 
 ### Lazy expiration
 
-Khi key được truy cập, Redis kiểm tra key có hết hạn chưa.
-
 ```text
 GET session:abc
-→ lookup key trong dict
-→ lookup expire timestamp trong expires dict
-→ nếu expired: xóa key, trả nil
-→ nếu chưa expired: trả value
+→ lookup key trong keyspace dict
+→ lookup expire_at trong expires dict
+→ nếu expired: xóa cả hai entry, trả nil
+→ nếu chưa: trả value
 ```
 
-Ưu điểm:
-
-- Rẻ, chỉ check khi cần.
-- Không cần timer per-key.
-
-Nhược điểm:
-
-- Key expired nhưng không ai truy cập có thể còn nằm trong memory.
+Ưu điểm: rẻ, không timer per-key. Nhược: key hết hạn nhưng không ai đọc có thể còn chiếm RAM.
 
 ### Active expiration
 
-Redis định kỳ lấy mẫu keys có TTL để xóa key expired.
-
-Concept:
-
 ```text
-serverCron chạy định kỳ
-→ chọn sample key trong expires dict
+serverCron (~ mỗi 100ms)
+→ sample ngẫu nhiên keys trong expires dict
 → xóa key đã hết hạn
-→ nếu tỷ lệ expired cao, tiếp tục quét thêm trong giới hạn thời gian
+→ nếu % expired cao → sample thêm, vẫn trong time limit mỗi chu kỳ
 ```
 
-Active expire giúp dọn key không được truy cập.
+Active expire dọn key “mồ côi” không ai truy cập. Chu kỳ ~10Hz + time budget → **không** xóa hết mọi key expired trong một nhịp; memory có thể giảm trễ vài ms đến vài giây tùy volume.
 
 ### Hệ quả thực tế
 
-TTL hết không đồng nghĩa memory giảm đúng ngay tại millisecond đó.
-
 ```text
-T0: key hết hạn
-T0 + vài ms/s: key có thể được lazy/active expire xóa
+T0:          TTL logic hết hạn (GET đã trả nil nếu lazy hit)
+T0 + Δ:      active expire mới xóa key idle → used_memory mới giảm
 ```
 
-Với workload nhiều key TTL ngắn, active expire có thể tốn CPU. Cần monitor latency và expired keys.
+Với workload nhiều key TTL ngắn, active expire tốn CPU trên main thread. Monitor `expired_keys`, latency, và xem [Slow Log & Latency](./slow-log-latency.md).
+
+> [!TIP]
+> String-specific pitfalls (`SET` mất TTL, `KEEPTTL`) nằm ngay section sau. Deep-dive encoding/SDS không thuộc Keys — xem [Strings](./strings.md).
 
 ---
 

@@ -35,7 +35,9 @@ INCR counter                        # → 1001, atomic, không cần lock
 SET lock:order:42 tok NX PX 30000   # distributed lock chỉ với một lệnh
 ```
 
-Cũng vì đơn giản mà String dễ dùng sai theo cách khó thấy: một value phình từ vài chục KB lên vài MB có thể làm chậm cả instance, một lần `SET` vô tình xóa mất TTL, hay hàng triệu key tên dài âm thầm ngốn RAM. Những cái bẫy này không nằm ở cú pháp lệnh, mà nằm ở **cách Redis lưu String bên trong**.
+Cũng vì đơn giản mà String dễ dùng sai theo cách khó thấy: một value phình từ vài chục KB lên vài MB có thể làm chậm cả instance, một lần `SET` vô tình xóa mất TTL, hay hàng triệu key tên dài âm thầm ngốn RAM. Ví dụ thực chiến hay gặp — cache HTML/JSON vài trăm KB với `GET` lặp lại: latency DB ~80ms rơi xuống ~0.2ms khi hit Redis; nhưng nếu một hot key phình thành blob multi-MB (hoặc `SET` ghi đè làm mất TTL), p99 instance lại bị “cắt” vì copy qua network và event loop.
+
+Những cái bẫy này không nằm ở cú pháp lệnh, mà nằm ở **cách Redis lưu String bên trong**.
 
 Vì vậy doc này đi từ trong ra ngoài: String nằm trong memory ra sao (SDS và ba encoding), vì sao `INCR` atomic mà không cần lock, các option của `SET` tạo nên lock/cache thế nào, TTL hoạt động ra sao — và cuối cùng là khi nào nên đổi sang [Hash](./hashes.md), [Bitmap](./bitmaps-hyperloglog.md) hoặc tách nhỏ value.
 
@@ -202,7 +204,7 @@ INCRBY pageviews 10   # 11
 INCR notanumber       # ERR value is not an integer
 ```
 
-Redis xử lý lệnh **tuần tự trên event loop** (một lệnh nặng làm chậm client khác — xem [Redis Overview](./redis-overview.md) § Event Loop):
+Redis xử lý lệnh **tuần tự trên event loop** (một lệnh nặng làm chậm client khác — xem [Redis Architecture](./redis-architecture.md) § Event loop):
 
 ```diagram
 Client A: INCR counter ─┐
@@ -562,7 +564,7 @@ Bạn có dữ liệu gì?
 2. **O(1) không có nghĩa là miễn phí theo byte**: value 8MB vẫn phải copy 8MB qua event loop và network.
 3. **TTL là thiết kế, không phải trang trí**: cache không TTL và `SET` mất TTL là hai nguồn memory leak phổ biến.
 
-Nếu quay lại sự cố đầu bài, fix không phải “mua Redis lớn hơn” trước tiên. Fix là chia payload 8.7MB, đặt TTL đúng, batch hợp lý, và chọn Hash/Bitmap/List khi String không còn là hình dạng tự nhiên của dữ liệu. **String là con dao sắc; dùng đúng, nó cắt latency từ 80ms xuống 0.2ms — dùng sai, nó cắt luôn p99 của bạn.**
+Nếu quay lại câu chuyện mở đầu: fix không phải “mua Redis lớn hơn” trước tiên. Fix là giữ value nhỏ (tách/nén khi blob phình), đặt TTL đúng, không để `SET` nuốt TTL, batch hợp lý, và chọn Hash/Bitmap/List khi String không còn là hình dạng tự nhiên của dữ liệu. **String là con dao sắc; dùng đúng, nó cắt latency từ ~80ms xuống ~0.2ms — dùng sai, nó cắt luôn p99 của bạn.**
 
 ---
 

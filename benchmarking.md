@@ -12,6 +12,7 @@
 - [Benchmark memory và eviction](#benchmark-memory-và-eviction)
 - [Benchmark persistence và replication](#benchmark-persistence-và-replication)
 - [Quan sát Redis trong lúc benchmark](#quan-sát-redis-trong-lúc-benchmark)
+- [Tool ngoài redis-benchmark: memtier & workload thực](#tool-ngoài-redis-benchmark-memtier--workload-thực)
 - [Sai lầm phổ biến](#sai-lầm-phổ-biến)
 - [Checklist benchmark production-like](#checklist-benchmark-production-like)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
@@ -425,6 +426,41 @@ Nếu Redis chạy container:
 docker stats
 kubectl top pod <redis-pod>
 ```
+
+---
+
+## Tool ngoài redis-benchmark: memtier & workload thực
+
+`redis-benchmark` tốt cho micro-bench command đơn. Workload production (Zipf, ratio get/set, multi-client, Cluster) thường dùng **memtier_benchmark** hoặc script multi-process:
+
+```bash
+# Cài (ví dụ): package memtier_benchmark / build từ RedisLabs/memtier_benchmark
+memtier_benchmark \
+  -s 10.0.0.10 -p 6379 \
+  -c 50 -t 4 \
+  --ratio=1:10 \
+  --key-pattern=G:G \
+  --key-maximum=1000000 \
+  --data-size=256 \
+  --pipeline=16 \
+  --test-time=60
+```
+
+| Nhu cầu | Tool gợi ý |
+|---------|------------|
+| So sánh GET/SET thô, pipeline `-P` | `redis-benchmark` |
+| Mix ratio, nhiều thread, key distribution | `memtier_benchmark` |
+| Cluster mode | client có cluster support / memtier cluster options / script slot-aware |
+| TLS | bật TLS trên cả tool và server; so sánh overhead riêng |
+| Zipf / hot key | memtier key-pattern hoặc generator riêng |
+
+Template ghi kết quả (lưu cùng config Redis):
+
+```text
+date | redis_version | tool | workload | QPS | p50 | p95 | p99 | errors | AOF/RDB/repl on?
+```
+
+Cross-check: pipeline số từ [Pipelining & Batching](./pipelining-batching.md); latency spike từ [Slow Log & Latency](./slow-log-latency.md).
 
 ---
 

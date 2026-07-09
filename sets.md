@@ -24,7 +24,7 @@
 
 Rất nhiều bài toán thực tế quy về cùng một câu hỏi: **"phần tử này đã có chưa?"** — user đã xem bài viết chưa, event này đã xử lý chưa, tài khoản có nằm trong whitelist không. Khi đó thứ ta cần không phải một danh sách có thứ tự, mà là một **tập hợp các phần tử duy nhất** với khả năng kiểm tra membership tức thì.
 
-Đó là Redis Set: tập hợp không thứ tự các string, tự động khử trùng, cho phép hỏi "có/không" trong O(1) và — điểm mạnh riêng của Redis — thực hiện **phép toán tập hợp (giao, hợp, hiệu) ngay trên server**. Lệnh chạy **tuần tự trên event loop** — một lệnh đúng chỗ vừa nhanh vừa tránh race ở app ([Redis Overview](./redis-overview.md)).
+Đó là Redis Set: tập hợp không thứ tự các string, tự động khử trùng, cho phép hỏi "có/không" trong O(1) và — điểm mạnh riêng của Redis — thực hiện **phép toán tập hợp (giao, hợp, hiệu) ngay trên server**. Lệnh chạy **tuần tự trên event loop** — một lệnh đúng chỗ vừa nhanh vừa tránh race ở app ([Redis Architecture](./redis-architecture.md)).
 
 ```bash
 SADD seen:2026-07-07 evt_8Kj2m       # trả 1 nếu mới, 0 nếu đã có
@@ -347,15 +347,23 @@ SSCAN followers:famous 0 COUNT 1000
 # lặp đến khi cursor trả về 0
 ```
 
-Cursor semantics (quy tắc dùng con trỏ khi scan incremental) cần nhớ:
+**Cursor ≠ offset pagination.** Redis encode vị trí trong **hash table** (bucket index + trạng thái rehash), không phải “bỏ qua N phần tử”:
+
+```text
+Set (hashtable) buckets:  [0][1][2]...[1023]
+SSCAN cursor=0 COUNT 1000
+  → walk một dải bucket, trả member gặp được
+  → cursor = “bucket tiếp theo cần quét” (mã hóa opaque)
+  → lặp tới cursor=0 (đã đi hết vòng)
+```
 
 | Tính chất | Ý nghĩa thực tế |
 |----------|------------------|
-| Cursor `0` bắt đầu và kết thúc vòng scan | Không phải offset, không dùng để “page 5” ổn định |
-| `COUNT` là hint, không phải limit cứng | Batch có thể nhiều/ít hơn |
+| Cursor `0` bắt đầu và kết thúc vòng scan | Không dùng để “page 5”; không so sánh cursor giữa client |
+| `COUNT` là hint, không phải limit cứng | Batch có thể nhiều/ít hơn; bucket rỗng/ dày khác nhau |
 | Có thể trả duplicate khi key thay đổi trong lúc scan | Client nên idempotent |
 | Không snapshot | Member thêm/xóa giữa vòng scan có thể thấy hoặc không |
-| `MATCH` filter sau khi scan bucket | Không biến thành index lookup |
+| `MATCH` filter **sau** khi lấy bucket | Pattern không biến scan thành index; set lệch pattern vẫn tốn CPU |
 
 > [!IMPORTANT]
 > Với set production không bounded rõ ràng, mặc định coi nó là big set: **không dùng `SMEMBERS` trong request path**. `SSCAN` + batch processing, hoặc thiết kế thêm index/pagination ở cấu trúc khác.
@@ -387,7 +395,7 @@ Memory trực giác:
 ```
 
 > [!CAUTION]
-> Lệnh O(N) + reply khổng lồ **block event loop** — request khác xếp hàng phía sau ([Redis Overview](./redis-overview.md)).
+> Lệnh O(N) + reply khổng lồ **block event loop** — request khác xếp hàng phía sau ([Redis Architecture](./redis-architecture.md)).
 
 ---
 

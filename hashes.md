@@ -206,7 +206,7 @@ OBJECT ENCODING h                 # vẫn "hashtable"
 | `HINCRBY key f delta` | O(1) | `HINCRBY user:42 logins 1` | Field missing được coi là 0 |
 | `HINCRBYFLOAT key f delta` | O(1) | `HINCRBYFLOAT stats spend 0.35` | Floating point string representation |
 
-`HINCRBY` là lý do Hash rất hợp cho counters theo entity. Với String JSON, bạn phải `GET` → parse → tăng → `SET`; muốn atomic phải dùng Lua hoặc transaction. Với Hash, một lệnh chạy trọn trên **event loop** — không bị client khác chen giữa (xem [Redis Overview](./redis-overview.md)).
+`HINCRBY` là lý do Hash rất hợp cho counters theo entity. Với String JSON, bạn phải `GET` → parse → tăng → `SET`; muốn atomic phải dùng Lua hoặc transaction. Với Hash, một lệnh chạy trọn trên **event loop** — không bị client khác chen giữa (xem [Redis Architecture](./redis-architecture.md)).
 
 ### 4.3. Nhóm “đọc toàn bộ” — tiện nhưng dễ thành bom
 
@@ -219,7 +219,7 @@ OBJECT ENCODING h                 # vẫn "hashtable"
 | `HSCAN key cursor [MATCH pattern] [COUNT n] [NOVALUES]` | O(1) mỗi call, O(N) cả vòng | Duyệt Hash lớn từng phần | Không đảm bảo snapshot nhất quán |
 
 > [!IMPORTANT]
-> `HGETALL` trên Hash 100K field là cùng họ lỗi với `KEYS *`: reply khổng lồ **block event loop** — mọi client khác phải chờ ([Redis Overview](./redis-overview.md)). Hash lớn → `HSCAN` hoặc `HMGET` đúng field.
+> `HGETALL` trên Hash 100K field là cùng họ lỗi với `KEYS *`: reply khổng lồ **block event loop** — mọi client khác phải chờ ([Redis Architecture](./redis-architecture.md)). Hash lớn → `HSCAN` hoặc `HMGET` đúng field.
 
 `HSCAN` mẫu:
 

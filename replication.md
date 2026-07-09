@@ -974,7 +974,22 @@ MASTER <-> REPLICA sync: Finished with success
 Connection with replica lost
 ```
 
-Nếu log full resync xuất hiện liên tục, cần kiểm tra backlog, network, replica crash/OOM, timeout và client-output-buffer-limit.
+Nếu log full resync xuất hiện liên tục, cần kiểm tra backlog, network, replica crash/OOM, timeout và `client-output-buffer-limit`.
+
+### Output buffer replica
+
+Master giữ output buffer cho mỗi replica. Replica chậm / network nghẽn → buffer phình → Redis **disconnect** replica → full resync:
+
+```conf
+# hard limit / soft limit / soft seconds — chỉnh theo write rate & RTT
+client-output-buffer-limit replica 256mb 64mb 60
+```
+
+| Triệu chứng | Hướng xử lý |
+|-------------|-------------|
+| Replica disconnect lặp | Tăng buffer hoặc giảm write burst; kiểm tra replica CPU/disk |
+| Full resync sau disconnect | Tăng `repl-backlog-size` để còn partial sync |
+| Memory master tăng theo replica | Nhiều replica chậm = nhiều buffer; cân nhắc topology |
 
 ---
 

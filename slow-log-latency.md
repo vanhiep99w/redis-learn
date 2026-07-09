@@ -486,6 +486,20 @@ redis-cli INFO persistence
 redis-cli INFO replication
 ```
 
+**Rank hot path bằng `commandstats`** (usec trung bình × số lần gọi):
+
+```bash
+redis-cli INFO commandstats | grep -E 'cmdstat_(get|set|hgetall|lrange|smembers|zrange|eval)'
+# Ví dụ:
+# cmdstat_hgetall:calls=1200,usec=4800000,usec_per_call=4000
+# → HGETALL trung bình 4ms — nghi big hash / full dump
+```
+
+Sắp xếp mentally theo `usec` tổng (`calls * usec_per_call`) để biết command nào đang “đốt” main thread, kể cả khi từng call dưới ngưỡng SLOWLOG.
+
+> [!NOTE]
+> **I/O threads (Redis 6+) ≠ song song hóa command.** Thread phụ chỉ giúp đọc/ghi socket; logic command vẫn tuần tự trên main thread. `INFO` CPU multi-core cao không có nghĩa command chạy song song — xem [Redis Architecture](./redis-architecture.md).
+
 ### 5. Xem OS/container
 
 ```bash

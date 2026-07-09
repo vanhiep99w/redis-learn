@@ -527,6 +527,54 @@ Client tốt sẽ:
 > [!IMPORTANT]
 > Không phải mọi Redis client đều hỗ trợ Sentinel tốt như nhau. Trước production, phải test failover thật với client library bạn dùng.
 
+### Ví dụ client Sentinel-aware
+
+**Node (ioredis):**
+
+```js
+const Redis = require("ioredis");
+const redis = new Redis({
+  sentinels: [
+    { host: "10.0.0.21", port: 26379 },
+    { host: "10.0.0.22", port: 26379 },
+    { host: "10.0.0.23", port: 26379 },
+  ],
+  name: "mymaster",
+  // password: "...", sentinelPassword: "..."
+  // maxRetriesPerRequest: null  // nếu dùng queue/blocking
+});
+```
+
+**Python (redis-py):**
+
+```python
+from redis.sentinel import Sentinel
+
+sentinel = Sentinel(
+    [("10.0.0.21", 26379), ("10.0.0.22", 26379), ("10.0.0.23", 26379)],
+    socket_timeout=0.5,
+)
+master = sentinel.master_for("mymaster", socket_timeout=0.5)
+master.set("k", "v")
+```
+
+**Java (Jedis):**
+
+```java
+Set<String> sentinels = Set.of("10.0.0.21:26379", "10.0.0.22:26379", "10.0.0.23:26379");
+JedisSentinelPool pool = new JedisSentinelPool("mymaster", sentinels);
+try (Jedis jedis = pool.getResource()) {
+  jedis.set("k", "v");
+}
+```
+
+Checklist khi test failover:
+
+1. Kill master trong lúc app write.
+2. App reconnect master mới (không hard-code IP cũ).
+3. Retry chỉ command idempotent; ghi business phải có outbox/idempotency.
+4. Timeout + circuit breaker để tránh retry storm vào Sentinel.
+
 ### Read từ replica qua Sentinel
 
 Sentinel cũng có command liệt kê replicas:

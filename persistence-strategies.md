@@ -249,6 +249,23 @@ Ba lớp phòng thủ độc lập — CẦN CẢ BA cho dữ liệu quan trọn
 > [!IMPORTANT]
 > `WAIT numreplicas timeout` cho phép chờ N replica xác nhận trước khi coi lệnh là bền hơn, giảm cửa sổ mất dữ liệu async — nhưng nó đánh đổi latency và **không** biến replication thành đồng bộ tuyệt đối. Chi tiết: [Replication](./replication.md). Backup off-site vẫn bắt buộc — [Backup & Restore](./backup-restore.md).
 
+Ví dụ copy được (sau write quan trọng):
+
+```bash
+SET order:8812:status paid
+# Chờ ít nhất 1 replica xác nhận offset trong 100ms
+WAIT 1 100
+# → integer: số replica đã ack (0 nếu timeout — app phải quyết định retry/alert)
+```
+
+| Kết quả `WAIT` | Ý nghĩa |
+|----------------|---------|
+| `>= numreplicas` | Đủ replica đã nhận write (vẫn có thể mất nếu *cả* master+các replica đó chết trước khi chúng persist) |
+| `< numreplicas` | Timeout — durability yếu hơn kỳ vọng; đừng im lặng bỏ qua |
+
+> [!WARNING]
+> **Chỉ bật RDB/AOF trên replica, master tắt persistence** giúp master nhẹ hơn, nhưng nếu replica lag/mất và failover không đúng, bạn có thể **mất path persistence**. Cần monitoring lag + failover drill. Không coi “persistence-only-on-replica” là free lunch.
+
 ---
 
 ## 8. Cây quyết định chọn strategy

@@ -107,7 +107,7 @@ Vì Bitmap là String, nó chịu giới hạn String tối đa **512MB**. 512MB
 | 4,000,000,000 | ~500MB | Một lệnh `SETBIT` có thể cấp phát khổng lồ |
 
 > [!WARNING]
-> `SETBIT key 4000000000 1` trên key rỗng pad ~**500MB** và có thể **block event loop** lúc cấp phát ([Redis Overview](./redis-overview.md)). ID UUID/snowflake thưa → HLL hoặc mapping int, đừng dùng làm offset.
+> `SETBIT key 4000000000 1` trên key rỗng pad ~**500MB** và có thể **block event loop** lúc cấp phát ([Redis Architecture](./redis-architecture.md)). ID UUID/snowflake thưa → HLL hoặc mapping int, đừng dùng làm offset.
 
 ### 3.2. Vì sao BITCOUNT nhanh nhưng vẫn là O(N)?
 
@@ -220,9 +220,11 @@ HLL có thể cho bạn `|signup ∪ active|`, nhưng không thể cho bitmap gi
 
 ---
 
-## 6. BITFIELD — packed counters trong một String
+## 6. Mở rộng Bitmap: BITFIELD — packed counters trong một String
 
-`BITFIELD` nâng Bitmap từ “mảng bit” thành “mảng số nguyên bit-width tùy ý”. Bạn có thể đặt nhiều counter nhỏ trong một key: `u4`, `u8`, `i16`, `u32`, thậm chí width tới 64 bit tùy signed/unsigned theo command.
+Phần 5–7 so sánh hai vũ khí **đếm unique** (Bitmap exact vs HLL xấp xỉ). Section này là **nhánh mở rộng Bitmap**: không còn chỉ bit cờ 0/1, mà đóng gói nhiều counter số nguyên trong cùng một String — use case khác DAU/MAU (game HP, level, inventory flags…).
+
+`BITFIELD` nâng Bitmap từ “mảng bit” thành “mảng số nguyên bit-width tùy ý”: `u4`, `u8`, `i16`, `u32`, width tới 64 bit tùy signed/unsigned.
 
 ```bash
 # Mảng u16 counter: user_id làm index, mỗi counter 16 bit
@@ -292,7 +294,28 @@ Register được cập nhật:
   registers[index] = max(registers[index], rank)
 ```
 
-Một hash có 18 zero liên tiếp ở phần rank là sự kiện hiếm; nếu đã thấy nó, cardinality chắc không nhỏ. Nhưng một register quá nhiễu, nên HLL dùng **16,384 registers** rồi lấy trung bình điều hòa (harmonic mean — cách trung bình giảm ảnh hưởng của vài giá trị cực lớn) kèm bias correction.
+Một hash có 18 zero liên tiếp ở phần rank là sự kiện hiếm; nếu đã thấy nó, cardinality chắc không nhỏ. Nhưng một register quá nhiễu, nên HLL dùng **16,384 registers** rồi gộp chúng bằng trung bình điều hòa (harmonic mean) + bias correction.
+
+**Từ mảng register → con số `PFCOUNT` (khép vòng):**
+
+Gọi `M[j]` = rank (độ hiếm) đang lưu ở register `j`, `m = 16384`:
+
+```text
+1) Z = Σ  2^(-M[j])     trên j = 0 .. m-1
+      (mỗi register đóng góp nghịch đảo theo “độ hiếm”)
+
+2) E_raw = α_m · m² / Z
+      α_m ≈ 0.7213 / (1 + 1.079/m)   (hằng số bias theo m)
+
+3) Hiệu chỉnh biên (Redis/HLL++):
+   - E rất nhỏ  → linear counting trên số register còn 0
+   - E rất lớn  → correction theo miền gần 2^64
+   - giữa khoảng → dùng E_raw (có bias correction)
+
+4) PFCOUNT ≈ round(E_corrected)
+```
+
+`PFADD` chỉ **cập nhật max rank** trên đúng 1 register; `PFCOUNT` quét ~16K register để tính `Z` rồi ra estimate — O(m) cố định, không phụ thuộc cardinality. `PFMERGE` lấy `max` từng register giữa các HLL (union xấp xỉ).
 
 ### 7.2. Vì sao sai số là 0.81%?
 

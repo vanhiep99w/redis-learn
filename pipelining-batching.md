@@ -95,6 +95,27 @@ Redis response:
 | Tăng memory buffer | Pipeline quá lớn làm client/server buffer phình |
 | Không giảm độ phức tạp command | `SMEMBERS huge:set` vẫn nặng |
 
+### Buffer limits — failure mode production
+
+Pipeline gom nhiều reply vào **output buffer** phía server (và buffer phía client). Reply lớn × N command có thể:
+
+- Phình `client-output-buffer-limit` → Redis **kill** connection.
+- Client OOM hoặc timeout khi đọc chậm.
+
+```conf
+# redis.conf — ví dụ (điều chỉnh theo workload; hard/soft)
+client-output-buffer-limit normal 0 0 0
+client-output-buffer-limit replica 256mb 64mb 60
+client-output-buffer-limit pubsub 32mb 8mb 60
+```
+
+Thực hành:
+
+- Batch **vừa** (thường 100–1000 command đơn giản; đo p99).
+- Tránh pipeline `HGETALL`/`LRANGE`/`SMEMBERS` trên key lớn.
+- Theo dõi `rejected_connections`, client killed, `INFO clients`.
+- Auto-pipeline của client library: tin khi command độc lập & response nhỏ; **explicit chunk** khi payload lớn hoặc cần backpressure.
+
 ### Redis vẫn single-threaded execution path
 
 Pipeline không làm Redis xử lý song song command trên nhiều core. Nó chỉ giúp Redis ít idle chờ network hơn.

@@ -175,6 +175,24 @@ Redis **không bao giờ chủ động fsync** — để OS tự quyết định
 | `everysec` | Mỗi giây (nền) | ~1 giây | Nhanh | **Mặc định** — hầu hết production |
 | `no` | OS tự quyết (~30s) | Nhiều, không đoán trước | Nhanh nhất | Hiếm; gần như nên dùng RDB thay thế |
 
+### 5.5 Timeline: dataset / reply client / bền trên đĩa
+
+Hiểu nhầm phổ biến: nghĩ `everysec` = “mỗi giây mới `SET` xong”. Thực tế dataset trong RAM đổi **ngay**; khác nhau chỉ ở **khi nào client nhận OK** và **khi nào đĩa an toàn**.
+
+| Policy | Dataset (RAM) đổi khi nào? | Client nhận reply khi nào? | Bền trên đĩa khi nào? |
+|--------|----------------------------|----------------------------|------------------------|
+| `always` | Ngay khi command execute | **Sau** `write` + `fsync` | Trước khi reply (gần như) |
+| `everysec` | Ngay khi command execute | Sau `write` vào page cache (không chờ fsync) | Background fsync ≤ ~1s sau |
+| `no` | Ngay khi command execute | Sau `write` vào page cache | Khi OS flush (có thể hàng chục giây) |
+
+```text
+everysec (mặc định):
+  t=0.0  SET a 1  → RAM OK, write() page cache, reply OK ngay
+  t=0.3  SET b 2  → tương tự
+  t=1.0  background fsync → a,b mới chắc trên đĩa
+  crash lúc t=0.8 → có thể mất a,b dù client đã thấy OK
+```
+
 > [!WARNING]
 > `always` không "bền gấp đôi" `everysec` một cách miễn phí. Nó có thể cắt throughput ghi xuống nhiều lần và khiến p99 latency phụ thuộc hoàn toàn vào đĩa. Chỉ chọn `always` khi thật sự không được mất một giây dữ liệu, và luôn chạy trên đĩa nhanh. Đo trước bằng [Benchmarking](./benchmarking.md).
 

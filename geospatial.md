@@ -13,7 +13,8 @@
 - [9. Anti-patterns cần tránh](#9-anti-patterns-cần-tránh)
 - [10. Giới hạn: Redis Geo không phải GIS](#10-giới-hạn-redis-geo-không-phải-gis)
 - [11. Case study thực tế](#11-case-study-thực-tế)
-- [12. Tóm tắt: cheat-sheet & 3 nguyên tắc](#12-tóm-tắt-cheat-sheet--3-nguyên-tắc)
+- [12. Best Practices](#12-best-practices)
+- [13. Tóm tắt: cheat-sheet & 3 nguyên tắc](#13-tóm-tắt-cheat-sheet--3-nguyên-tắc)
 - [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ---
@@ -65,7 +66,7 @@ Không có “geo tree” riêng. Không có R-tree. Không có per-member metad
 | `ZRANGE key ... WITHSCORES` | thấy raw geohash score |
 
 > [!TIP]
-> Aha quan trọng nhất: **Geo là ZSet** — memory, O(log N), big key, lệnh nặng **block event loop**, hash slot Cluster, `ZREM`/`ZCARD`/`ZSCAN` ([Sorted Sets](./sorted-sets.md), [Redis Overview](./redis-overview.md)).
+> Aha quan trọng nhất: **Geo là ZSet** — memory, O(log N), big key, lệnh nặng **block event loop**, hash slot Cluster, `ZREM`/`ZCARD`/`ZSCAN` ([Sorted Sets](./sorted-sets.md), [Redis Architecture](./redis-architecture.md)).
 
 Hệ quả thiết kế:
 
@@ -300,7 +301,7 @@ Scan 1 + 8 area:
 ```
 
 > [!NOTE]
-> Geo search phụ thuộc **mật độ trong vùng grid**, không phải tổng member toàn key. Radius lớn ở khu đông → query nặng, có thể **block event loop** ([Redis Overview](./redis-overview.md)).
+> Geo search phụ thuộc **mật độ trong vùng grid**, không phải tổng member toàn key. Radius lớn ở khu đông → query nặng, có thể **block event loop** ([Redis Architecture](./redis-architecture.md)).
 
 ---
 
@@ -316,7 +317,7 @@ Cost GEOSEARCH ≈
 + response_size                     # network + serialization
 ```
 
-Query trả hàng chục nghìn điểm **block event loop** — client khác phải chờ ([Redis Overview](./redis-overview.md)).
+Query trả hàng chục nghìn điểm **block event loop** — client khác phải chờ ([Redis Architecture](./redis-architecture.md)).
 
 ### 6.2. Benchmark tư duy theo radius
 
@@ -529,7 +530,19 @@ Case này minh họa vì sao hiểu internals đáng tiền: biết Geo là zset
 
 ---
 
-## 12. Tóm tắt: cheat-sheet & 3 nguyên tắc
+## 12. Best Practices
+
+- **Shard theo vùng** (`drivers:{hcm}`, `drivers:{hn}`) — một key toàn quốc = big key + hot slot Cluster.
+- **Heartbeat TTL** cho online set: `GEOADD` + `SET hb:... 1 EX 30`; janitor `ZREM` member mất heartbeat.
+- **Radius nhỏ trước, expand sau** (2km → 5km); luôn `COUNT` + `ASC` khi cần nearest đúng thứ tự.
+- **`COUNT ... ANY`** khi chỉ cần “có ai trong vùng”, không cần sort đủ distance.
+- Pipeline `GEOADD` + metadata (`SET`/`HSET`) cùng hash tag slot.
+- Không dùng Geo làm GIS (polygon, routing, projection) — chuyển PostGIS / search engine.
+- Đo p99 `GEOSEARCH` theo **mật độ vùng**, không theo tổng member toàn key.
+
+---
+
+## 13. Tóm tắt: cheat-sheet & 3 nguyên tắc
 
 ### Redis Geo đủ dùng khi nào?
 

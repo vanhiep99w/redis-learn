@@ -21,6 +21,7 @@
 - [Latency: những điểm dễ gây spike](#latency-những-điểm-dễ-gây-spike)
 - [Quan sát kiến trúc Redis bằng command](#quan-sát-kiến-trúc-redis-bằng-command)
 - [Best practices từ góc nhìn architecture](#best-practices-từ-góc-nhìn-architecture)
+- [Cheat sheet kiến trúc](#cheat-sheet-kiến-trúc)
 - [Tài liệu liên quan](#tài-liệu-liên-quan)
 
 ---
@@ -589,7 +590,8 @@ Mỗi vòng cron:
 - nếu tỷ lệ expired cao, tiếp tục quét thêm trong giới hạn thời gian
 ```
 
-Điều này giúp Redis dọn key expired ngay cả khi không ai truy cập.
+> [!NOTE]
+> Process model expire nằm ở đây; command TTL, `SET` làm mất TTL, stampede, hot/big key → deep-dive ở [Keys, Naming & TTL](./keys-and-ttl.md).
 
 ### TTL ảnh hưởng replication thế nào?
 
@@ -889,12 +891,12 @@ Hữu ích để debug memory overhead và big key.
 Tránh command có N không kiểm soát. Nếu phải dùng range, đặt limit rõ ràng.
 
 ```bash
+# Nên: range có biên
 ZRANGE leaderboard 0 99 REV WITHSCORES
 ```
 
-Tốt hơn:
-
 ```bash
+# Không nên: dump gần như cả set
 ZRANGE leaderboard 0 999999 REV
 ```
 

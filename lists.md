@@ -35,7 +35,7 @@ LPUSH feed:user:42 "đã đăng bài"
 LTRIM feed:user:42 0 99
 ```
 
-Sức mạnh của List nằm ở hai đầu, và cạm bẫy của nó cũng vậy: mọi thao tác ở **giữa** list (`LINDEX`, `LINSERT`, `LRANGE` một khoảng lớn) đều là O(N). Một lệnh nhìn vô hại như `LRANGE 0 -1` trên list cả triệu phần tử có thể serialize hàng trăm MB và **block event loop** — làm chậm mọi client khác ([Redis Overview](./redis-overview.md)).
+Sức mạnh của List nằm ở hai đầu, và cạm bẫy của nó cũng vậy: mọi thao tác ở **giữa** list (`LINDEX`, `LINSERT`, `LRANGE` một khoảng lớn) đều là O(N). Một lệnh nhìn vô hại như `LRANGE 0 -1` trên list cả triệu phần tử có thể serialize hàng trăm MB và **block event loop** — làm chậm mọi client khác ([Redis Architecture](./redis-architecture.md)).
 
 Doc này trả lời các câu hỏi cốt lõi: vì sao `LPUSH`/`RPOP` là O(1) còn thao tác giữa list là O(N); List thật sự nằm trong memory thế nào (**quicklist** = danh sách liên kết các node, mỗi node thường chứa **listpack** = khối memory liên tục nhồi nhiều entry nhỏ); blocking queue "block" client ra sao mà server vẫn chạy; pattern reliable queue với `LMOVE`/`BLMOVE` tránh mất job; và khi nào nên chuyển sang [Streams](./streams.md), [Pub/Sub](./pub-sub.md) hay [Sorted Set](./sorted-sets.md).
 
@@ -502,7 +502,7 @@ Các số dưới đây là benchmark minh họa trên Redis local, payload JSON
 | `LREM q 0 job-x` | 1M | scan 1M | 35ms | 90ms | Dùng làm set là anti-pattern |
 
 > [!IMPORTANT]
-> Một lệnh reply 100MB không chỉ chậm cho client đó; nó **block event loop** và trì hoãn mọi lệnh khác ([Redis Overview](./redis-overview.md)).
+> Một lệnh reply 100MB không chỉ chậm cho client đó; nó **block event loop** và trì hoãn mọi lệnh khác ([Redis Architecture](./redis-architecture.md)).
 
 ### 8.2. Memory: listpack tiết kiệm nhưng không miễn phí
 
@@ -559,7 +559,7 @@ Minh họa với 1.000.000 element:
 - Cần broadcast realtime → dùng Pub/Sub.
 - Cần random access ở giữa list → List là O(N) ở giữa.
 
-Nền tảng event loop: [Redis Overview](./redis-overview.md).
+Nền tảng event loop: [Redis Architecture](./redis-architecture.md).
 
 ---
 
@@ -834,7 +834,7 @@ Quay lại câu chuyện mở đầu: Redis không sập vì 80.000 email/phút;
 - [Redis Lists](https://redis.io/docs/latest/develop/data-types/lists/)
 - [Redis list commands](https://redis.io/commands/?group=list)
 - [Redis configuration example — list-max-listpack-size/list-compress-depth](https://redis.io/docs/latest/operate/oss_and_stack/management/config/)
-- [Redis Overview](./redis-overview.md) — event loop, single-thread mental model
+- [Redis Architecture](./redis-architecture.md) — event loop, single-thread command execution
 - [Streams](./streams.md) — queue cần consumer groups, ack, replay
 - [Pub/Sub](./pub-sub.md) — realtime fan-out không lưu message
 - [Sorted Sets](./sorted-sets.md) — priority/delayed queue và ranking

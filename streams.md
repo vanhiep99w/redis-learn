@@ -314,7 +314,7 @@ XADD orders MAXLEN '~' 1000000 LIMIT 1000 '*' event created order_id 8812
 
 ## 7. Consumer Groups: chia tải, fan-out và trạng thái server-side
 
-Consumer group giải quyết bài toán: nhiều worker cùng xử lý một stream, mỗi entry mới giao cho **một consumer trong group**, nhưng nhiều group khác nhau vẫn nhận đủ event.
+Consumer group giải quyết bài toán: nhiều worker cùng xử lý một stream, mỗi entry mới giao cho **một consumer trong group**, nhưng nhiều group khác nhau vẫn nhận đủ event (fan-out theo group).
 
 ```bash
 # 0 = group bắt đầu từ đầu stream; $ = chỉ entry mới sau thời điểm tạo group
@@ -327,6 +327,25 @@ XREADGROUP GROUP g:payment payment-1 COUNT 50 BLOCK 5000 STREAMS orders '>'
 # Xử lý xong thì ack
 XACK orders g:payment 1783400000123-0 1783400000123-1
 ```
+
+### Luật chia tải (pull, không phải push fair-queue)
+
+Redis **không** push message đều cho worker như Kafka consumer rebalance. Assignment xảy ra **tại lúc** `XREADGROUP ... '>'`:
+
+| Điểm | Hành vi thực tế |
+|------|------------------|
+| Ai nhận entry mới? | Consumer nào gọi `XREADGROUP >` **trước** / lấy được reply trước — pull race |
+| Worker nhanh hơn? | Gọi `XREADGROUP` thường hơn → **lấy nhiều entry hơn** (không sticky partition) |
+| Worker chậm / chết? | Entry đã giao nằm PEL của consumer đó cho tới `XACK` / `XCLAIM` |
+| Scale out worker | Thêm process gọi cùng group name; không cần reassign partition |
+| So với Kafka | Không có partition ownership cố định; không “đúng 1 consumer = 1 partition” |
+
+```text
+payment-1 ──XREADGROUP >──▶  lấy 50 entry mới (giao + vào PEL của payment-1)
+payment-2 ──XREADGROUP >──▶  lấy 50 entry *tiếp theo* chưa giao
+```
+
+Vì vậy autoscaling worker **có ích** cho throughput, nhưng không đảm bảo fair share tuyệt đối; consumer chậm không “giữ slot” ngăn consumer khác lấy việc **mới** — chỉ giữ **pending đã giao**.
 
 Group state trong Redis:
 
@@ -465,7 +484,7 @@ Kết luận: consumer phải **idempotent** (xử lý lặp lại cùng một m
 
 | Semantics | Cách đạt trong Redis Stream | Trade-off |
 |-----------|-----------------------------|-----------|
-| At-least-once | XREADGROUP → xử lý → XACK | Có thể xử lý trùng |
+| At-least-once | XREADGROUP → xử lý → XACK | Có thể xử lý trùng; dùng idempotency key = stream ID (`SETNX processed:<id> 1` / unique DB) |
 | At-most-once (tối đa một lần; có thể mất) | XACK trước hoặc ngay khi nhận | Crash sau ack thì mất message |
 | Exactly-once (đúng một lần end-to-end) | Không có native end-to-end | Cần idempotency key/transaction ở downstream |
 

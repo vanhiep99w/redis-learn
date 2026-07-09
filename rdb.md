@@ -105,7 +105,7 @@ SAVE
 
 `SAVE` là kiểu "đóng cửa tiệm để kiểm kê": đơn giản và chắc chắn, nhưng trong lúc làm thì không phục vụ ai được.
 
-`SAVE` ghi RDB **ngay trong tiến trình chính (main thread)**. Vì Redis xử lý lệnh single-threaded (một luồng chính xử lý tuần tự phần lớn command; xem [Redis Overview](./redis-overview.md)), trong suốt thời gian ghi file, **không request nào khác được xử lý** — toàn bộ client bị treo.
+`SAVE` ghi RDB **ngay trong tiến trình chính (main thread)**. Vì Redis xử lý lệnh single-threaded (một luồng chính xử lý tuần tự phần lớn command; xem [Redis Architecture](./redis-architecture.md)), trong suốt thời gian ghi file, **không request nào khác được xử lý** — toàn bộ client bị treo.
 
 ```diagram
 Main thread (single-threaded event loop):
@@ -198,6 +198,26 @@ Cha muốn ghi vào trang P:
 ```
 
 Kết quả tuyệt vời: con luôn nhìn thấy **ảnh chụp đóng băng tại giây fork**, dù cha có sửa dữ liệu bao nhiêu đi nữa. Snapshot nhất quán mà không cần lock, không cần dừng ghi.
+
+### 5.2b Ghi file atomic: temp → fsync → rename
+
+Child **không** ghi đè trực tiếp `dump.rdb` đang dùng. Luồng an toàn:
+
+```text
+1. Child mở file tạm (vd. temp-<pid>.rdb)
+2. Serialize dataset → ghi vào file tạm
+3. fsync() file tạm  → dữ liệu trên đĩa, không chỉ page cache
+4. rename(temp, dump.rdb)  → atomic trên cùng filesystem
+5. Child exit; parent cập nhật lastsave / dirty
+```
+
+| Tình huống | Hệ quả |
+|------------|--------|
+| Crash giữa chừng khi ghi temp | `dump.rdb` **cũ còn nguyên** — lần start sau load bản tốt trước đó |
+| Crash sau rename | Bản mới đã thay thế; bản cũ không còn |
+| Disk đầy khi ghi temp | BGSAVE fail; file cũ thường vẫn dùng được |
+
+Đây là lý do “BGSAVE hỏng giữa chừng” ít khi phá backup đang có — miễn là bạn **không** xóa `dump.rdb` tay trong lúc child đang chạy.
 
 ### 5.3 Cái giá: RAM có thể phình lên
 
