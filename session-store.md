@@ -70,7 +70,7 @@ sequenceDiagram
     A->>A: Generate 256-bit random session ID
     A->>R: SET sess:<hash(sid)> payload EX 1800
     R-->>A: OK
-    A-->>U: Set-Cookie sid=...; HttpOnly; Secure; SameSite=Lax
+    A-->>U: Set-Cookie sid=... với HttpOnly, Secure, SameSite=Lax
 ```
 
 ### 2.2. Authenticated request flow
