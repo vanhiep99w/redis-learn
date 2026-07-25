@@ -1,3 +1,4 @@
+import { rehypeCodeDefaultOptions } from 'fumadocs-core/mdx-plugins';
 import { defineDocs, defineConfig } from 'fumadocs-mdx/config';
 import { visit } from 'unist-util-visit';
 
@@ -62,6 +63,10 @@ export const docs = defineDocs({
 
 export default defineConfig({
   mdxOptions: {
+    rehypeCodeOptions: {
+      ...rehypeCodeDefaultOptions,
+      fallbackLanguage: 'text',
+    },
     remarkPlugins: [remarkMermaid, remarkGithubAdmonition],
   },
 });

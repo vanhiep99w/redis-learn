@@ -6,6 +6,7 @@
 # Astro
 node_modules/
 dist/
+*.tsbuildinfo
 .astro/
 src/content/docs/
 

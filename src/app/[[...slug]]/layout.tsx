@@ -7,9 +7,7 @@ export default function Layout({ children }: { children: ReactNode }) {
     <DocsLayout
       tree={source.pageTree}
       nav={{ title: 'Redis Learning' }}
-      sidebar={{
-        tabs: false,
-      }}
+      tabs={false}
     >
       {children}
     </DocsLayout>
