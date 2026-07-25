@@ -6,11 +6,13 @@
 :root {
   --fd-font: 'Inter', system-ui, sans-serif;
   --fd-font-mono: 'JetBrains Mono', monospace;
+  --fd-layout-width: 100vw;
 }
 
-/* Wider content area */
-#nd-page article {
+/* Use the available space between the sidebar and table of contents. */
+#nd-page {
   max-width: none;
+  padding-inline: 1rem;
 }
 
 /* Vietnamese text readability */
