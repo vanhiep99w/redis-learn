@@ -206,7 +206,24 @@ Các mức xử lý:
 > [!NOTE]
 > Cache-aside không tự cung cấp strong consistency. Hãy định nghĩa “stale tối đa X giây” thay vì hứa “luôn đồng bộ” nếu thiết kế chỉ dựa vào TTL và `DEL`.
 
-### 3.4. Khi nào dùng
+### 3.4. Ví dụ thực tế: trang chi tiết sản phẩm
+
+Một sàn thương mại điện tử có endpoint `GET /products/42` nhận hàng nghìn request/phút, trong khi tên, mô tả và giá sản phẩm chỉ đổi vài lần mỗi ngày:
+
+```text
+GET /products/42
+  ├─ GET cache:product:v3:42
+  ├─ hit  → trả sản phẩm trong Redis
+  └─ miss → SELECT từ PostgreSQL → SET EX 300 → trả sản phẩm
+
+Admin cập nhật giá
+  ├─ UPDATE products ... → COMMIT
+  └─ DEL cache:product:v3:42
+```
+
+Cache-aside phù hợp vì chỉ những sản phẩm thực sự có người xem mới chiếm memory. Sản phẩm ít được truy cập không bị đưa vào cache chỉ vì vừa được import hoặc cập nhật.
+
+### 3.5. Khi nào dùng
 
 Dùng khi read-heavy, dữ liệu có thể cũ trong một khoảng ngắn, application kiểm soát data access. Không lý tưởng nếu nhiều ứng dụng độc lập cùng truy cập nguồn dữ liệu nhưng không cùng tuân thủ invalidation.
 
@@ -238,6 +255,46 @@ Một loader tốt cần:
 - Negative cache cho not-found.
 - Metrics phân biệt hit, miss, load success, load failure.
 - Không cache exception và response tạm lỗi.
+
+### 4.1. Ví dụ thực tế: chuẩn hóa cách đọc hồ sơ người dùng
+
+Trong một backend lớn, màn hình checkout, navbar và customer-support đều cần đọc hồ sơ người dùng. Thay vì mỗi module tự viết `GET Redis → SELECT PostgreSQL → SET Redis`, team cung cấp một abstraction dùng chung:
+
+```typescript
+const userCache = createReadThroughCache<User>({
+  key: (id) => `cache:user:v2:${id}`,
+  ttlSeconds: 600,
+  load: (id) => db.user.findUnique({ where: { id } }),
+});
+
+// Business code không cần biết cache hit hay miss.
+const user = await userCache.get(userId);
+```
+
+Abstraction này đặc biệt hữu ích khi nhiều call site cùng đọc một loại entity và cần dùng thống nhất TTL, negative caching, single-flight và metrics.
+
+### 4.2. Write được xử lý thế nào?
+
+Read-through **chỉ định nghĩa đường đọc**, không tự quy định đường ghi. Cách mặc định là cập nhật source of truth trước rồi invalidate cache:
+
+```typescript
+async function updateUser(id: string, input: UpdateUserInput) {
+  const user = await db.user.update({ where: { id }, data: input });
+  await userCache.invalidate(id); // DEL cache:user:v2:<id>
+  return user;
+}
+```
+
+```text
+WRITE: Application → UPDATE DB → DEL cache
+READ kế tiếp: Cache miss → loader đọc DB → SET cache → return
+```
+
+Nếu dữ liệu vừa ghi chắc chắn được đọc ngay, có thể kết hợp read-through với **write-through**: cập nhật DB rồi cập nhật cache ngay. Với nhiều service cùng ghi, nên phát invalidation event bằng outbox/CDC thay vì trông chờ mọi service tự gọi `DEL`.
+
+### 4.3. Khi nào dùng
+
+Dùng khi muốn chuẩn hóa data-access cho nhiều module/service và có một loader rõ ràng cho từng loại key. Không nên tạo abstraction quá tổng quát đến mức che giấu query đắt, transaction boundary hoặc quyền truy cập dữ liệu.
 
 ---
 
@@ -280,9 +337,30 @@ DB transaction: UPDATE product + INSERT outbox event
 CDC/outbox worker ──> DEL/SET cache ──> retry được
 ```
 
-### 5.2. Khi không nên write-through
+### 5.2. Ví dụ thực tế: cập nhật hồ sơ rồi đọc ngay
 
-Nếu write-heavy nhưng object ít được đọc, mỗi write đang tạo payload cache vô ích, tiêu tốn CPU serialization, network và memory. Cache-aside chỉ nạp object thực sự được đọc nên thường hiệu quả hơn.
+Sau `PATCH /users/123`, hồ sơ mới sẽ xuất hiện ngay trên navbar, trang tài khoản và màn hình support. API có thể ghi PostgreSQL rồi làm nóng cache ngay:
+
+```typescript
+async function updateUser(id: string, input: UpdateUserInput) {
+  const user = await db.user.update({ where: { id }, data: input });
+
+  try {
+    await redis.set(`cache:user:v2:${id}`, JSON.stringify(user), { EX: 600 });
+  } catch (error) {
+    // DB đã commit và vẫn là source of truth.
+    await retryQueue.enqueue({ type: 'INVALIDATE_USER_CACHE', id });
+  }
+
+  return user;
+}
+```
+
+Request đọc ngay sau đó thường hit cache với dữ liệu mới, không tạo thêm query DB. Pattern này hợp lý khi tỷ lệ “write xong đọc ngay” cao và payload cache có thể tạo chính xác từ kết quả transaction.
+
+### 5.3. Khi không nên write-through
+
+Nếu write-heavy nhưng object ít được đọc, mỗi write đang tạo payload cache vô ích, tiêu tốn CPU serialization, network và memory. Cache-aside chỉ nạp object thực sự được đọc nên thường hiệu quả hơn. Không dùng cache làm căn cứ xác nhận cuối cùng cho payment, ledger hoặc tồn kho nếu database mới là source of truth.
 
 ---
 
@@ -320,7 +398,28 @@ Pattern này giảm write latency và batch được nhiều update, nhưng lúc
 > [!WARNING]
 > `SET cache` rồi “fire-and-forget một background task” không phải write-behind an toàn. Nếu process chết giữa hai bước, write biến mất. Dùng Redis Streams hoặc durable broker, persistence phù hợp và idempotent consumer.
 
-Các use case phù hợp: page-view counter, telemetry aggregation, game statistics có thể phục hồi/chấp nhận mất rất nhỏ. Không phù hợp mặc định cho payment, inventory reservation, ledger.
+### 6.1. Ví dụ thực tế: bộ đếm lượt xem bài viết
+
+Một trang tin nhận hàng chục nghìn lượt xem/giây. Ghi từng lượt trực tiếp vào PostgreSQL sẽ tạo nhiều row update và lock contention, nên request chỉ cập nhật Redis và ghi durable event:
+
+```text
+Request xem bài 42
+  └─ Redis transaction/Lua
+       ├─ HINCRBY article:views:realtime 42 1
+       └─ XADD article:view-events * eventId=<uuid> articleId=42 delta=1
+
+Worker mỗi 5 giây
+  ├─ XREADGROUP một batch event
+  ├─ gộp delta theo articleId
+  ├─ UPSERT PostgreSQL với event deduplication
+  └─ XACK sau khi DB commit
+```
+
+Dashboard realtime đọc counter từ Redis; báo cáo dài hạn đọc PostgreSQL. `eventId` hoặc batch ID giúp worker retry mà không cộng trùng. Nếu số lượt xem là dữ liệu bắt buộc không được mất, cần đánh giá durability của Redis AOF/replication hoặc dùng durable broker mạnh hơn làm event log.
+
+### 6.2. Khi nào dùng
+
+Phù hợp với page-view counter, telemetry aggregation và game statistics khi cần write latency thấp, có thể batch, và chấp nhận eventual consistency. Không phù hợp mặc định cho payment, inventory reservation hoặc ledger vì mất/ghi trùng một event có hậu quả nghiệp vụ lớn.
 
 ---
 
