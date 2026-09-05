@@ -46,6 +46,7 @@ Tài liệu học Redis tiếng Việt — Next.js + Fumadocs, deploy trên Clou
 ## Patterns & Use Cases
 
 - [x] [Caching Patterns](caching-patterns.md) - Cache-aside, write-through, write-behind, cache stampede, TTL strategies
+- [x] [Request Coalescing](request-coalescing.md) - Chống cache stampede với singleflight, Redis lease, timeout và hai mức TTL
 - [x] [Session Store](session-store.md) - Lưu session với TTL, Spring Session, serialization
 - [x] [Rate Limiting](rate-limiting.md) - Fixed window, sliding window, token bucket với Redis
 - [x] [Leaderboard & Counting](leaderboard-counting.md) - Sorted set leaderboard, real-time ranking, counting patterns
