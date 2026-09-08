@@ -281,6 +281,25 @@ Nếu scale từ 3 lên 10 pod, chỉ dùng local singleflight thì trong cùng 
 
 **Câu hỏi quyết định là: các request có cùng nhìn thấy đăng ký “đang lấy dữ liệu này” hay không? Cùng map thì gom được trong Java; khác JVM thì cần thêm cơ chế phối hợp chung.**
 
+### Bài toán thực tế phù hợp
+
+Fleet-wide coalescing phù hợp khi một resource được đọc nhiều, rebuild tốn kém và nhiều pod có thể cùng nhận request cho cùng key.
+
+| Bài toán | Key minh họa | Công việc chỉ nên chạy một lần mỗi đợt miss |
+|---|---|---|
+| Trang sản phẩm đang viral | `product:123` | Đọc DB và dựng payload sản phẩm |
+| Trang chủ hoặc landing page | `homepage:v1:vi` | Tổng hợp banner, CMS blocks và danh sách sản phẩm |
+| API profile phổ biến | `user:987` | Đọc profile, follower count và badges |
+| Dashboard thống kê | `dashboard:tenant:42:today` | Chạy aggregate query nặng |
+| Báo cáo theo tenant | `report:tenant:42:month:2026-03` | Tạo snapshot hoặc truy vấn tổng hợp đắt tiền |
+| Tỷ giá/dữ liệu external | `exchange-rate:USD-VND` | Gọi API có rate limit |
+| Metadata SEO | `seo:product:123` | Dựng Open Graph, title từ nhiều nguồn |
+| Feature/config dùng chung | `config:pricing-rules:v5` | Refresh từ database hoặc config service |
+
+Các trường hợp này thường kết hợp tốt với stale-while-revalidate: waiter nhận bản cũ trong giới hạn cho phép, trong khi một leader refresh ở background.
+
+Không dùng Redis lease ở đây làm cơ chế correctness chính cho thao tác có side effect hoặc cần nhất quán mạnh, như trừ tiền, tạo đơn hàng, cấp quota, quyết định tồn kho cuối cùng, hoặc chống gửi email/thanh toán trùng. Những bài toán đó cần idempotency key, unique constraint/database transaction, fencing token hoặc workflow durable.
+
 ## 5. Chọn key để chia sẻ kết quả an toàn
 
 Gom theo `/products/42` có thể sai nếu cùng URL trả giá khác nhau theo tenant, tiền tệ hoặc quyền truy cập.
