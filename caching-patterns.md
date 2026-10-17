@@ -30,13 +30,24 @@ Giả sử API sản phẩm nhận 20.000 request/giây. Mỗi request đọc Po
 
 Cache đặt một bản sao gần application hơn:
 
-```text
-Không cache
-Client ──20.000 req/s──> API ──20.000 query/s──> Database
-
-Có cache, hit ratio 95%
-Client ──20.000 req/s──> API ──19.000 GET/s──> Redis
-                              └──1.000 query/s──> Database
+```d2 title="Ảnh hưởng của cache hit ratio 95%"
+direction: right
+plain: Không cache {
+  client: Client
+  api: API
+  db: Database {shape: cylinder}
+  client -> api: 20.000 req/s
+  api -> db: 20.000 query/s
+}
+cached: "Có cache — hit ratio 95%" {
+  client: Client
+  api: API
+  redis: Redis {icon: https://icons.d2lang.com/dev/redis.svg}
+  db: Database {shape: cylinder}
+  client -> api: 20.000 req/s
+  api -> redis: 19.000 GET/s
+  api -> db: 1.000 query/s
+}
 ```
 
 Nếu Redis mất khoảng 0,5 ms còn database mất 12 ms, latency trung bình gần đúng là:
@@ -62,13 +73,17 @@ Nhưng cache tạo thêm ba bài toán khó:
 
 Trong hầu hết hệ thống, database là **source of truth**; Redis cache là **derived data** có thể tái tạo. Nếu xóa toàn bộ cache mà không làm mất nghiệp vụ, ranh giới này đang đúng.
 
-```mermaid
-graph LR
-    C[Client] --> A[Application]
-    A -->|GET cache key| R[(Redis)]
-    A -->|cache miss / write| D[(Source of truth)]
-    D -->|rebuild value| A
-    A -->|SET với TTL| R
+```d2 title="2.1. Source of truth và derived data"
+direction: right
+C: "Client"
+A: "Application"
+R: "Redis" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+D: "Source of truth" { shape: cylinder }
+C -> A
+A -> R: "GET cache key"
+A -> D: "cache miss / write"
+D -> A: "rebuild value"
+A -> R: "SET với TTL"
 ```
 
 Phân loại dữ liệu trước khi chọn pattern:
@@ -107,25 +122,25 @@ Cache-aside, còn gọi là lazy loading, là pattern phổ biến nhất. Appli
 
 ### 3.1. Read flow
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as Application
-    participant R as Redis
-    participant D as Database
-
-    C->>A: GET /products/42
-    A->>R: GET cache:product:v3:42
-    alt Cache hit
-        R-->>A: JSON product
-        A-->>C: 200 product
-    else Cache miss
-        R-->>A: nil
-        A->>D: SELECT product 42
-        D-->>A: product row
-        A->>R: SET key value EX 300
-        A-->>C: 200 product
-    end
+```d2 title="3.1. Read flow"
+shape: sequence_diagram
+C: "Client"
+A: "Application"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+D: "Database"
+C -> A: "GET /products/42"
+A -> R: "GET cache:product:v3:42"
+branch_1: "alt: Cache hit (nhánh thay thế)" {
+  R -> A: "JSON product" { style.stroke-dash: 4 }
+  A -> C: "200 product" { style.stroke-dash: 4 }
+}
+branch_2: "else: Cache miss (nhánh thay thế)" {
+  R -> A: "nil" { style.stroke-dash: 4 }
+  A -> D: "SELECT product 42"
+  D -> A: "product row" { style.stroke-dash: 4 }
+  A -> R: "SET key value EX 300"
+  A -> C: "200 product" { style.stroke-dash: 4 }
+}
 ```
 
 Pseudo-code:
@@ -160,16 +175,15 @@ async function getProduct(id: string): Promise<Product | null> {
 
 Với cache-aside, cách an toàn và đơn giản thường là:
 
-```mermaid
-sequenceDiagram
-    participant A as Application
-    participant D as Database
-    participant R as Redis
-
-    A->>D: UPDATE product SET price=...
-    D-->>A: COMMIT OK
-    A->>R: DEL cache:product:v3:42
-    R-->>A: deleted
+```d2 title="3.2. Write flow: update DB rồi xóa cache"
+shape: sequence_diagram
+A: "Application"
+D: "Database"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+A -> D: "UPDATE product SET price=..."
+D -> A: "COMMIT OK" { style.stroke-dash: 4 }
+A -> R: "DEL cache:product:v3:42"
+R -> A: "deleted" { style.stroke-dash: 4 }
 ```
 
 Tại sao **xóa** thay vì update cache?
@@ -210,15 +224,23 @@ Các mức xử lý:
 
 Một sàn thương mại điện tử có endpoint `GET /products/42` nhận hàng nghìn request/phút, trong khi tên, mô tả và giá sản phẩm chỉ đổi vài lần mỗi ngày:
 
-```text
-GET /products/42
-  ├─ GET cache:product:v3:42
-  ├─ hit  → trả sản phẩm trong Redis
-  └─ miss → SELECT từ PostgreSQL → SET EX 300 → trả sản phẩm
-
-Admin cập nhật giá
-  ├─ UPDATE products ... → COMMIT
-  └─ DEL cache:product:v3:42
+```d2 title="Luồng đọc và invalidation khi cập nhật sản phẩm"
+direction: down
+read: GET /products/42
+get: "GET cache:product:v3:42"
+hit: Cache hit? {shape: diamond}
+cached: Trả sản phẩm trong Redis
+query: SELECT từ PostgreSQL
+populate: SET EX 300
+result: Trả sản phẩm
+admin: Admin cập nhật giá
+update: UPDATE products và COMMIT
+delete: "DEL cache:product:v3:42"
+read -> get -> hit
+hit -> cached: Có
+hit -> query: Không
+query -> populate -> result
+admin -> update -> delete
 ```
 
 Cache-aside phù hợp vì chỉ những sản phẩm thực sự có người xem mới chiếm memory. Sản phẩm ít được truy cập không bị đưa vào cache chỉ vì vừa được import hoặc cập nhật.
@@ -233,10 +255,20 @@ Dùng khi read-heavy, dữ liệu có thể cũ trong một khoảng ngắn, app
 
 Read-through có flow giống cache-aside nhưng logic load nằm sau một abstraction/library/cache service. Business code chỉ gọi `cache.get(productId)`; loader tự đọc DB khi miss.
 
-```text
-Business code ──get(42)──> Cache abstraction
-                           ├─ hit  → return
-                           └─ miss → loader → DB → cache → return
+```d2 title="Read-through qua cache abstraction"
+direction: right
+business: Business code
+cache: Cache abstraction
+hit: Hit? {shape: diamond}
+loader: Loader
+db: DB {shape: cylinder}
+populate: Populate cache
+result: Return
+business -> cache: get(42)
+cache -> hit
+hit -> result: Có
+hit -> loader: Không
+loader -> db -> populate -> result
 ```
 
 | Tiêu chí | Cache-aside | Read-through |
@@ -285,9 +317,24 @@ async function updateUser(id: string, input: UpdateUserInput) {
 }
 ```
 
-```text
-WRITE: Application → UPDATE DB → DEL cache
-READ kế tiếp: Cache miss → loader đọc DB → SET cache → return
+```d2 title="Write-around và lần đọc tiếp theo"
+shape: sequence_diagram
+app: Application
+db: Database
+cache: Redis cache
+write: WRITE {
+  app -> db: UPDATE DB
+  db -> app: COMMIT
+  app -> cache: DEL cache
+}
+read: READ kế tiếp {
+  app -> cache: GET cache
+  cache -> app: Miss
+  app -> db: Loader đọc DB
+  db -> app: Value
+  app -> cache: SET cache
+  app."Return"
+}
 ```
 
 Nếu dữ liệu vừa ghi chắc chắn được đọc ngay, có thể kết hợp read-through với **write-through**: cập nhật DB rồi cập nhật cache ngay. Với nhiều service cùng ghi, nên phát invalidation event bằng outbox/CDC thay vì trông chờ mọi service tự gọi `DEL`.
@@ -302,19 +349,18 @@ Dùng khi muốn chuẩn hóa data-access cho nhiều module/service và có m�
 
 Write-through cập nhật source of truth và cache đồng bộ trước khi trả thành công.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as Application
-    participant D as Database
-    participant R as Redis
-
-    C->>A: PUT /products/42
-    A->>D: UPDATE product
-    D-->>A: COMMIT OK
-    A->>R: SET cache:product:v3:42 ... EX 300
-    R-->>A: OK
-    A-->>C: 200 OK
+```d2 title="5. Write-through: ghi cache và database trên request path"
+shape: sequence_diagram
+C: "Client"
+A: "Application"
+D: "Database"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+C -> A: "PUT /products/42"
+A -> D: "UPDATE product"
+D -> A: "COMMIT OK" { style.stroke-dash: 4 }
+A -> R: "SET cache:product:v3:42 ... EX 300"
+R -> A: "OK" { style.stroke-dash: 4 }
+A -> C: "200 OK" { style.stroke-dash: 4 }
 ```
 
 Ưu điểm: request đọc sau có thể hit ngay, phù hợp dữ liệu vừa ghi sẽ được đọc nhiều. Nhược điểm: dual write không atomic giữa DB và Redis.
@@ -330,11 +376,13 @@ sequenceDiagram
 
 Không thể dùng Redis transaction để atomically commit cùng PostgreSQL. Nếu consistency quan trọng, dùng **transactional outbox**:
 
-```text
-DB transaction: UPDATE product + INSERT outbox event
-                         │
-                         ▼
-CDC/outbox worker ──> DEL/SET cache ──> retry được
+```d2 title="Outbox cho phép retry cập nhật cache"
+direction: right
+n0: "DB transaction:\nUPDATE product + INSERT outbox event"
+n1: "CDC / outbox worker"
+n2: "DEL / SET cache"
+n3: "Retry được nếu lỗi"
+n0 -> n1 -> n2 -> n3
 ```
 
 ### 5.2. Ví dụ thực tế: cập nhật hồ sơ rồi đọc ngay
@@ -368,23 +416,22 @@ Nếu write-heavy nhưng object ít được đọc, mỗi write đang tạo pay
 
 Write-behind, hay write-back, xác nhận write sau khi ghi Redis rồi đẩy thay đổi xuống database bất đồng bộ.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as Application
-    participant R as Redis
-    participant S as Stream/Queue
-    participant W as Writer worker
-    participant D as Database
-
-    C->>A: Update counter/profile
-    A->>R: Atomic update
-    A->>S: Append durable change event
-    A-->>C: Accepted
-    W->>S: Read batch
-    W->>D: Upsert batch
-    D-->>W: Commit
-    W->>S: ACK
+```d2 title="6. Write-behind: ghi cache trước, đồng bộ database sau"
+shape: sequence_diagram
+C: "Client"
+A: "Application"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+S: "Stream/Queue"
+W: "Writer worker"
+D: "Database"
+C -> A: "Update counter/profile"
+A -> R: "Atomic update"
+A -> S: "Append durable change event"
+A -> C: "Accepted" { style.stroke-dash: 4 }
+W -> S: "Read batch"
+W -> D: "Upsert batch"
+D -> W: "Commit" { style.stroke-dash: 4 }
+W -> S: "ACK"
 ```
 
 Pattern này giảm write latency và batch được nhiều update, nhưng lúc này Redis/queue nằm trên đường durability. Cần trả lời:
@@ -402,17 +449,20 @@ Pattern này giảm write latency và batch được nhiều update, nhưng lúc
 
 Một trang tin nhận hàng chục nghìn lượt xem/giây. Ghi từng lượt trực tiếp vào PostgreSQL sẽ tạo nhiều row update và lock contention, nên request chỉ cập nhật Redis và ghi durable event:
 
-```text
-Request xem bài 42
-  └─ Redis transaction/Lua
-       ├─ HINCRBY article:views:realtime 42 1
-       └─ XADD article:view-events * eventId=<uuid> articleId=42 delta=1
-
-Worker mỗi 5 giây
-  ├─ XREADGROUP một batch event
-  ├─ gộp delta theo articleId
-  ├─ UPSERT PostgreSQL với event deduplication
-  └─ XACK sau khi DB commit
+```d2 title="Write-behind cho bộ đếm lượt xem"
+shape: sequence_diagram
+request: Request xem bài 42
+redis: Redis
+worker: Worker mỗi 5 giây
+db: PostgreSQL
+request -> redis: Transaction/Lua
+redis."HINCRBY article:views:realtime 42 1"
+redis."XADD article:view-events\neventId=<uuid> articleId=42 delta=1"
+worker -> redis: XREADGROUP batch event
+worker."Gộp delta theo articleId"
+worker -> db: UPSERT với event deduplication
+db -> worker: COMMIT
+worker -> redis: XACK
 ```
 
 Dashboard realtime đọc counter từ Redis; báo cáo dài hạn đọc PostgreSQL. `eventId` hoặc batch ID giúp worker retry mà không cộng trùng. Nếu số lượt xem là dữ liệu bắt buộc không được mất, cần đánh giá durability của Redis AOF/replication hoặc dùng durable broker mạnh hơn làm event log.
@@ -491,12 +541,13 @@ Lưu hai mốc trong payload:
 
 Một hot key nhận 5.000 request/giây. Khi TTL hết, mọi request nhìn thấy miss trước khi query đầu tiên kịp nạp lại. Một miss logic biến thành hàng nghìn query đồng thời.
 
-```text
-                 key hết hạn
-req 1 ─┐
-req 2 ─┼── miss ──> cùng query DB ──> connection pool đầy
-...    │
-req N ─┘
+```d2 title="Cache stampede khi hot key hết hạn"
+direction: right
+requests: "req 1 … req N\nKey vừa hết hạn"
+miss: Cache miss cùng key
+db: Cùng query DB
+pool: Connection pool đầy
+requests -> miss -> db -> pool
 ```
 
 ### 8.1. Request coalescing / single-flight
@@ -507,10 +558,22 @@ Trong một process, giữ một Promise đang load theo key; các request sau c
 
 Request đầu giành lock ngắn bằng `SET NX PX`; request khác backoff rồi đọc lại cache. Cần token và safe unlock như [Distributed Lock](./distributed-lock.md).
 
-```text
-miss → SET lock:cache:product:42 token NX PX 3000
-  ├─ OK: query DB → SET cache → safe DEL lock
-  └─ nil: sleep 20–50 ms + jitter → GET cache → fallback có giới hạn
+```d2 title="Lease giảm số caller cùng refill cache"
+direction: down
+miss: Cache miss
+lock: "SET lock:cache:product:42 token NX PX 3000"
+acquired: Acquire thành công? {shape: diamond}
+query: Query DB
+populate: SET cache
+release: Safe DEL lock
+wait: Sleep 20–50 ms và jitter
+get: GET cache
+fallback: Fallback có giới hạn nếu cần
+miss -> lock -> acquired
+acquired -> query: OK
+query -> populate -> release
+acquired -> wait: nil
+wait -> get -> fallback
 ```
 
 Không giữ lock lâu hơn query cần thiết. Nếu loader lỗi, lock TTL phải tự giải phóng. Không để mọi waiter busy-loop Redis.
@@ -590,19 +653,18 @@ Update product 42 không dễ biết mọi query cache chứa nó.
 
 ### 10.2. Event-driven invalidation
 
-```mermaid
-sequenceDiagram
-    participant W as Product Service
-    participant D as Database
-    participant O as Outbox/CDC
-    participant I as Cache invalidator
-    participant R as Redis
-
-    W->>D: UPDATE product + outbox event
-    D-->>W: COMMIT
-    O-->>I: ProductUpdated(id=42, version=18)
-    I->>R: UNLINK cache:product:v3:42
-    I->>R: DEL related index keys
+```d2 title="10.2. Event-driven invalidation"
+shape: sequence_diagram
+W: "Product Service"
+D: "Database"
+O: "Outbox/CDC"
+I: "Cache invalidator"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+W -> D: "UPDATE product + outbox event"
+D -> W: "COMMIT" { style.stroke-dash: 4 }
+O -> I: "ProductUpdated(id=42, version=18)" { style.stroke-dash: 4 }
+I -> R: "UNLINK cache:product:v3:42"
+I -> R: "DEL related index keys"
 ```
 
 Event phải retry được và idempotent. Pub/Sub thuần có thể mất invalidation khi consumer offline; dùng [Streams](./streams.md) hoặc durable broker nếu mất event dẫn tới stale kéo dài.
@@ -850,16 +912,24 @@ Một dashboard chỉ có global `keyspace_hits` có thể che giấu cache A t�
 
 ### 16.2. Thiết kế
 
-```mermaid
-graph TD
-    U[Web/API] --> L1[L1 local cache 2s]
-    L1 --> R[(Redis entity cache TTL 30-45s)]
-    R --> D[(Product DB)]
-    W[Admin write] --> D
-    D --> O[Transactional outbox]
-    O --> I[Invalidation worker]
-    I --> R
-    I --> P[Pub/Sub invalidation L1]
+```d2 title="16.2. Thiết kế"
+direction: down
+U: "Web/API"
+L1: "L1 local cache 2s"
+R: "Redis entity cache TTL 30-45s" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+D: "Product DB" { shape: cylinder }
+W: "Admin write"
+O: "Transactional outbox"
+I: "Invalidation worker"
+P: "Pub/Sub invalidation L1"
+U -> L1
+L1 -> R
+R -> D
+W -> D
+D -> O
+O -> I
+I -> R
+I -> P
 ```
 
 Quyết định:

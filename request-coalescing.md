@@ -50,12 +50,13 @@ Giả sử `product:42` hết hạn. Database cần 200 ms để đọc và dự
 
 Với cache-aside thông thường:
 
-```text
-100 request → GET product:42 → 100 cache miss
-                              ↓
-                         100 query DB
-                              ↓
-                         100 lần SET
+```d2 title="Stampede tạo nhiều origin fetch trùng nhau"
+direction: down
+requests: 100 request cùng key
+cache: "GET product:42 → 100 cache miss"
+db: 100 query DB
+populate: 100 lần SET
+requests -> cache -> db -> populate
 ```
 
 Mỗi request đều thực hiện logic hợp lệ: không thấy cache thì đọc database. Nhưng toàn hệ thống đang tính lại cùng một kết quả nhiều lần. Đây là **cache stampede**: nhiều request cùng tái tạo dữ liệu cache, gây tải đột biến lên nguồn dữ liệu.
@@ -80,28 +81,28 @@ T_refill = 0,2 giây
 
 **Leader** là lời gọi được chọn để thực hiện công việc chung. **Waiter** là lời gọi tham gia sau và đợi kết quả đó. Leader ở đây chỉ tồn tại cho một key trong một lần refill, không phải leader cố định của cả cluster.
 
-```mermaid
-sequenceDiagram
-    participant A as Request A
-    participant B as Request B
-    participant S as Singleflight trong process
-    participant R as Redis cache
-    participant D as Database
-    A->>R: GET product:42
-    R-->>A: Miss
-    A->>S: Đăng ký công việc product:42
-    S->>R: Đọc lại cache
-    R-->>S: Miss
-    S->>D: Fetch product:42
-    B->>R: GET product:42
-    R-->>B: Miss
-    B->>S: Tham gia công việc đang chạy
-    D-->>S: Product
-    S->>R: SET product:42 với TTL
-    R-->>S: OK
-    S->>S: Xóa entry in-flight
-    S-->>A: Product
-    S-->>B: Cùng kết quả Product
+```d2 title="3. Cơ chế leader và waiter"
+shape: sequence_diagram
+A: "Request A"
+B: "Request B"
+S: "Singleflight trong process"
+R: "Redis cache" { icon: https://icons.d2lang.com/dev/redis.svg }
+D: "Database"
+A -> R: "GET product:42"
+R -> A: "Miss" { style.stroke-dash: 4 }
+A -> S: "Đăng ký công việc product:42"
+S -> R: "Đọc lại cache"
+R -> S: "Miss" { style.stroke-dash: 4 }
+S -> D: "Fetch product:42"
+B -> R: "GET product:42"
+R -> B: "Miss" { style.stroke-dash: 4 }
+B -> S: "Tham gia công việc đang chạy"
+D -> S: "Product" { style.stroke-dash: 4 }
+S -> R: "SET product:42 với TTL"
+R -> S: "OK" { style.stroke-dash: 4 }
+S -> S: "Xóa entry in-flight"
+S -> A: "Product" { style.stroke-dash: 4 }
+S -> B: "Cùng kết quả Product" { style.stroke-dash: 4 }
 ```
 
 Trong một process, cấu trúc thường dùng là:
@@ -188,16 +189,15 @@ Giả sử bạn chạy một ứng dụng Spring Boot. 100 request cùng cần 
 
 Nếu các request cùng dùng một đối tượng `SingleFlight`, chúng cùng kiểm tra map bên trong đối tượng đó:
 
-```text
-100 request cùng cần product:42
-              ↓
-     Một map Java dùng chung
-              ↓
-     1 công việc được đăng ký
-              ↓
-         1 lần gọi DB
-
-Các request còn lại chờ kết quả của công việc đó.
+```d2 title="Singleflight dùng chung một công việc trong process"
+direction: down
+requests: "100 request cùng cần product:42"
+map: Một map Java dùng chung
+work: 1 công việc được đăng ký
+db: 1 lần gọi DB
+waiters: Các request còn lại chờ cùng kết quả
+requests -> map -> work -> db
+map -> waiters: Join công việc đang chạy
 ```
 
 Ứng dụng có thể dùng nhiều thread xử lý request. Điều này không ngăn coalescing: `ConcurrentHashMap` cho phép các thread truy cập an toàn vào **cùng một map**.
@@ -214,13 +214,24 @@ Cả ba pod chạy cùng code, kết nối đến cùng Redis và database. Như
 
 Giả sử 100 request cùng cần sản phẩm 42 được phân phối vào ba pod. Cache đang trống và các lần fetch chồng thời gian với nhau:
 
-```text
-                         product-service (replicas: 3)
-100 request cùng key ─┬→ Pod A: 34 request → map A → 1 query DB
-                      ├→ Pod B: 33 request → map B → 1 query DB
-                      └→ Pod C: 33 request → map C → 1 query DB
-
-                                                Tổng: 3 query DB
+```d2 title="Singleflight local vẫn có một origin fetch mỗi pod"
+direction: right
+requests: 100 request cùng key
+service: "product-service — replicas: 3" {
+  a: Pod A — 34 request → map A
+  b: Pod B — 33 request → map B
+  c: Pod C — 33 request → map C
+}
+qa: 1 query DB từ A
+qb: 1 query DB từ B
+qc: 1 query DB từ C
+total: Tổng 3 query DB
+requests -> service.a
+requests -> service.b
+requests -> service.c
+service.a -> qa -> total
+service.b -> qb -> total
+service.c -> qc -> total
 ```
 
 Tại sao không còn một lần gọi DB như ví dụ trước?
@@ -251,13 +262,26 @@ Một lệnh `GET` trả miss không tự đăng ký quyền fetch cho người 
 
 Cần thêm một nơi đăng ký công việc mà cả ba pod đều nhìn thấy. Ví dụ, dùng Redis lưu một quyền fetch có thời hạn, gọi là **lease**:
 
-```text
-Pod A → xin quyền fetch product:42 trên Redis → được cấp → gọi DB
-Pod B → xin cùng quyền đó                    → không được → chờ cache
-Pod C → xin cùng quyền đó                    → không được → chờ cache
-
-Pod A lấy dữ liệu xong → ghi Redis cache
-Pod B và pod C đọc lại cache → nhận dữ liệu, không cần gọi DB
+```d2 title="Redis lease giảm duplicate fetch giữa các pod"
+shape: sequence_diagram
+a: Pod A
+b: Pod B
+c: Pod C
+redis: Redis
+db: Database
+a -> redis: Xin quyền fetch product:42
+redis -> a: Được cấp lease
+b -> redis: Xin cùng quyền
+redis -> b: Không được — chờ cache
+c -> redis: Xin cùng quyền
+redis -> c: Không được — chờ cache
+a -> db: Fetch product:42
+db -> a: Product
+a -> redis: Ghi Redis cache
+b -> redis: Đọc lại cache
+redis -> b: Product — không cần gọi DB
+c -> redis: Đọc lại cache
+redis -> c: Product — không cần gọi DB
 ```
 
 Việc cấp quyền phải là thao tác atomic: khi các pod xin cùng lúc, chỉ một bên được cấp quyền trong thời gian lease còn hiệu lực. Phần 8 trình bày cách thực hiện bằng `SET ... NX PX`, cách chờ và xử lý khi bên đang fetch bị lỗi.
@@ -697,21 +721,42 @@ SET lease:{product:42}:v1 unique-owner-token NX PX 1000
 
 ### Luồng điều phối
 
-```text
-GET cache
-  ├─ Hit → trả kết quả
-  └─ Miss → tham gia local singleflight
-               ↓
-          GET cache lần nữa
-               ↓ nếu vẫn miss
-          Thử acquire Redis lease
-            ├─ Thắng → GET cache lại → nếu vẫn miss thì fetch
-            │                          → publish khi còn ownership
-            │                          → trả kết quả
-            └─ Thua → chờ ngắn có jitter → GET cache lại
-                       ├─ Có dữ liệu → trả kết quả
-                       ├─ Chưa có, còn deadline → thử tiếp
-                       └─ Hết deadline → stale hợp lệ hoặc lỗi có kiểm soát
+```d2 title="Kết hợp cache, local singleflight và fleet lease"
+direction: down
+get: GET cache
+hit: Hit? {shape: diamond}
+result: Trả kết quả
+join: Tham gia local singleflight
+recheck: GET cache lần nữa
+miss: Vẫn miss? {shape: diamond}
+acquire: Thử acquire Redis lease
+won: Thắng lease? {shape: diamond}
+last: GET cache lại
+still: Vẫn miss? {shape: diamond}
+fetch: Fetch origin
+publish: Publish khi còn ownership
+wait: Chờ ngắn có jitter rồi GET cache
+available: Có dữ liệu? {shape: diamond}
+deadline: Còn deadline? {shape: diamond}
+fallback: Stale hợp lệ hoặc lỗi có kiểm soát
+get -> hit
+hit -> result: Có
+hit -> join: Không
+join -> recheck -> miss
+miss -> result: Không
+miss -> acquire: Có
+acquire -> won
+won -> last: Có
+last -> still
+still -> result: Không
+still -> fetch: Có
+fetch -> publish -> result
+won -> wait: Không
+wait -> available
+available -> result: Có
+available -> deadline: Chưa
+deadline -> acquire: Có
+deadline -> fallback: Hết deadline
 ```
 
 Local singleflight vẫn hữu ích: trong một process, chỉ một coordinator của key đi tranh lease và polling. Các waiter còn lại chờ `CompletableFuture` local.

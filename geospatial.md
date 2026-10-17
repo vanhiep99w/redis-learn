@@ -137,32 +137,31 @@ Trực giác là: nếu hai điểm rơi vào cùng một khu phố trên bản 
 
 Z-order giữ được **locality tương đối**: các điểm chung prefix geohash dài thường nằm gần nhau trên bản đồ, nên chúng cũng nằm gần nhau trong zset score.
 
-```text
-Bản đồ 2D được “gấp” thành đường Z-order:
-
-┌───────┬───────┐
-│   2   │   3   │
-├───────┼───────┤
-│   0   │   1   │
-└───────┴───────┘
-
-Zoom sâu hơn:
-0 → 00,01,02,03
-1 → 10,11,12,13
-...
+```d2 title="Các ô geohash và thứ tự Z-order"
+grid: "Minh họa ô 2D — không phải bản đồ tỷ lệ" {
+  grid-columns: 2
+  c2: "2"
+  c3: "3"
+  c0: "0"
+  c1: "1"
+}
+detail: Zoom sâu hơn {
+  grid-columns: 2
+  zero: "0 → 00, 01, 02, 03"
+  one: "1 → 10, 11, 12, 13"
+}
 ```
 
 Điểm mạnh: range scan trên score có thể gom một vùng địa lý.
 
 Điểm yếu: **boundary problem** (vấn đề ở ranh giới ô). Hai điểm cách nhau 5m nhưng nằm hai bên ranh giới ô geohash có thể có prefix khác nhau rất sớm.
 
-```text
-┌─────────────┬─────────────┐
-│             │             │
-│      A ●    │    ● B      │
-│             │             │
-└─────────────┴─────────────┘
-       cùng đường phố, khác ô geohash
+```d2 title="Hai vị trí gần nhau có thể khác ô geohash"
+cells: Cùng đường phố, khác ô geohash {
+  grid-columns: 2
+  a: "Ô A\nVị trí A ●"
+  b: "Ô B\n● Vị trí B"
+}
 ```
 
 Vì vậy Redis không thể chỉ scan “ô chứa tâm”. Nó phải scan ô đó **và các ô lân cận** rồi lọc lại bằng khoảng cách thật.
@@ -282,22 +281,25 @@ Step 6 — Sort/COUNT
 
 Tại sao phải 9 ô? Đây là cách Redis tránh bỏ sót hàng xóm đứng ngay bên kia vạch kẻ ô. Vì boundary problem, nếu user đứng sát ranh giới ô, điểm gần nhất có thể nằm ở ô bên cạnh.
 
-```text
-Không scan neighbor:
-┌──────────────┬──────────────┐
-│              │              │
-│          ● U │ D ●          │  D rất gần U nhưng ở ô kế bên → miss
-│              │              │
-└──────────────┴──────────────┘
-
-Scan 1 + 8 area:
-┌─────┬─────┬─────┐
-│     │     │     │
-├─────┼─────┼─────┤
-│     │ ● U │ D ● │  D được đưa vào candidate rồi lọc distance
-├─────┼─────┼─────┤
-│     │     │     │
-└─────┴─────┴─────┘
+```d2 title="Vì sao GEOSEARCH xét cả các ô lân cận"
+direction: down
+miss: Không scan neighbor {
+  grid-columns: 2
+  user: "Ô đang xét\nU ở sát ranh giới"
+  driver: "Ô kế bên\nD rất gần U nhưng bị bỏ sót"
+}
+scan: "Scan 1 + 8 area — candidate rồi lọc distance" {
+  grid-columns: 3
+  nw: Tây Bắc
+  n: Bắc
+  ne: Đông Bắc
+  w: Tây
+  center: "Ô trung tâm\n● U"
+  e: "Ô phía Đông\nD ●"
+  sw: Tây Nam
+  s: Nam
+  se: Đông Nam
+}
 ```
 
 > [!NOTE]

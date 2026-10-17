@@ -17,6 +17,9 @@ src/content/docs/
 __pycache__/
 content/
 .next/
+.cache/
+playwright-report/
+test-results/
 .source/
 public/diagrams/
 

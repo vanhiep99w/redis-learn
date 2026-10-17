@@ -27,15 +27,23 @@
 
 Giả sử 20 WebSocket gateway đang giữ connection của user. Khi user 42 nhận notification, application không biết gateway nào đang giữ socket. Nó publish lên một channel; mọi gateway đang subscribe nhận message và gateway có connection phù hợp sẽ push xuống client.
 
-```mermaid
-graph LR
-    P[Notification Service] -->|PUBLISH user-events| R[(Redis Pub/Sub)]
-    R --> G1[Gateway 1]
-    R --> G2[Gateway 2]
-    R --> G3[Gateway 3]
-    G1 --> U1[Online users]
-    G2 --> U2[Online user 42]
-    G3 --> U3[Online users]
+```d2 title="1. Vấn đề: phát một message cho nhiều listener đang online"
+direction: right
+P: "Notification Service"
+R: "Redis Pub/Sub" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+G1: "Gateway 1"
+G2: "Gateway 2"
+G3: "Gateway 3"
+U1: "Online users"
+U2: "Online user 42"
+U3: "Online users"
+P -> R: "PUBLISH user-events"
+R -> G1
+R -> G2
+R -> G3
+G1 -> U1
+G2 -> U2
+G3 -> U3
 ```
 
 Redis Pub/Sub tối ưu cho **low-latency ephemeral fan-out**: publisher không cần biết subscriber, channel không phải key và message không được lưu lại.
@@ -228,14 +236,15 @@ Subscriber giữ connection mở lâu dài. Mỗi app instance thường cần:
 - Resubscribe sau reconnect theo behavior client library.
 - Readiness chỉ báo ready khi subscription cần thiết đã xác nhận.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Connecting
-    Connecting --> Subscribing: connected
-    Connecting --> Backoff: error
-    Subscribing --> Ready: subscribe confirmed
-    Ready --> Backoff: disconnect/error
-    Backoff --> Connecting: jitter delay
+```d2 title="7.1. Dedicated long-lived connection"
+direction: right
+start: "Bắt đầu" {shape: circle}
+start -> Connecting
+Connecting -> Subscribing: "connected"
+Connecting -> Backoff: "error"
+Subscribing -> Ready: "subscribe confirmed"
+Ready -> Backoff: "disconnect/error"
+Backoff -> Connecting: "jitter delay"
 ```
 
 ### 7.2. Reconnect gap
@@ -325,14 +334,21 @@ Xem [Security](./security.md).
 
 Decision:
 
-```text
-Có được phép mất message khi consumer offline?
-├─ Có → cần broadcast tới mọi listener online?
-│       ├─ Có → Pub/Sub
-│       └─ Không, một worker nhận job → List/queue
-└─ Không → cần ack/retry/replay?
-        ├─ Redis scale đủ → Streams
-        └─ Retention/partition/ecosystem lớn → Kafka/broker chuyên dụng
+```d2 title="Chọn Pub/Sub, queue, Streams hay broker"
+direction: down
+loss: Được phép mất message khi offline? {shape: diamond}
+broadcast: Broadcast tới mọi listener online? {shape: diamond}
+scale: Redis scale đủ cho ack/retry/replay? {shape: diamond}
+pubsub: Pub/Sub
+queue: List / queue — một worker nhận job
+streams: Redis Streams
+broker: Kafka / broker chuyên dụng
+loss -> broadcast: Có
+broadcast -> pubsub: Có
+broadcast -> queue: Không
+loss -> scale: Không — cần ack/retry/replay
+scale -> streams: Có
+scale -> broker: Retention / partition / ecosystem lớn
 ```
 
 Đọc [Streams](./streams.md) và [Lists](./lists.md).
@@ -343,20 +359,19 @@ Có được phép mất message khi consumer offline?
 
 ### 10.1. Kiến trúc
 
-```mermaid
-sequenceDiagram
-    participant N as Notification Service
-    participant R as Redis Pub/Sub
-    participant G1 as Gateway A
-    participant G2 as Gateway B
-    participant U as User WebSocket
-
-    G1->>R: SUBSCRIBE ws:partition:0..N
-    G2->>R: SUBSCRIBE ws:partition:0..N
-    N->>R: PUBLISH partition(user42), payload
-    R-->>G1: message
-    R-->>G2: message
-    G2->>U: push vì user42 đang ở G2
+```d2 title="10.1. Kiến trúc"
+shape: sequence_diagram
+N: "Notification Service"
+R: "Redis Pub/Sub" { icon: https://icons.d2lang.com/dev/redis.svg }
+G1: "Gateway A"
+G2: "Gateway B"
+U: "User WebSocket"
+G1 -> R: "SUBSCRIBE ws:partition:0..N"
+G2 -> R: "SUBSCRIBE ws:partition:0..N"
+N -> R: "PUBLISH partition(user42), payload"
+R -> G1: "message" { style.stroke-dash: 4 }
+R -> G2: "message" { style.stroke-dash: 4 }
+G2 -> U: "push vì user42 đang ở G2"
 ```
 
 Nếu mọi gateway subscribe mọi message, fan-out nội bộ = gateways × messages dù chỉ một gateway có user. Tối ưu:
@@ -389,17 +404,16 @@ Redis giữ order message theo connection/channel trong điều kiện bình th�
 
 ### 11.1. Cache invalidation
 
-```mermaid
-sequenceDiagram
-    participant W as Writer
-    participant D as DB
-    participant R as Redis Pub/Sub
-    participant A as App L1 caches
-
-    W->>D: COMMIT Product 42 version 18
-    W->>R: PUBLISH invalidate {id:42,v:18}
-    R-->>A: invalidate
-    A->>A: evict local product 42
+```d2 title="11.1. Cache invalidation"
+shape: sequence_diagram
+W: "Writer"
+D: "DB"
+R: "Redis Pub/Sub" { icon: https://icons.d2lang.com/dev/redis.svg }
+A: "App L1 caches"
+W -> D: "COMMIT Product 42 version 18"
+W -> R: "PUBLISH invalidate {id:42,v:18}"
+R -> A: "invalidate" { style.stroke-dash: 4 }
+A -> A: "evict local product 42"
 ```
 
 Nếu app offline bỏ lỡ invalidation, local cache có thể stale. Safety net:

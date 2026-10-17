@@ -56,19 +56,18 @@ Vấn đề khó là invalidation: key `user:42` đổi trên Redis nhưng pod v
 
 Flow cơ bản:
 
-```mermaid
-sequenceDiagram
-    participant A as App client A
-    participant R as Redis
-    participant B as Writer client B
-
-    A->>R: CLIENT TRACKING ON
-    A->>R: GET user:42
-    R-->>A: Alice
-    A->>A: Cache user:42 = Alice
-    B->>R: SET user:42 Flora
-    R-->>A: invalidate user:42
-    A->>A: Delete local user:42
+```d2 title="2. Server-assisted caching và Tracking"
+shape: sequence_diagram
+A: "App client A"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+B: "Writer client B"
+A -> R: "CLIENT TRACKING ON"
+A -> R: "GET user:42"
+R -> A: "Alice" { style.stroke-dash: 4 }
+A -> A: "Cache user:42 = Alice"
+B -> R: "SET user:42 Flora"
+R -> A: "invalidate user:42" { style.stroke-dash: 4 }
+A -> A: "Delete local user:42"
 ```
 
 Redis không gửi value mới; nó chỉ nói key không còn an toàn. Client phải xóa local entry. Read sau sẽ miss local và lấy lại Redis.
@@ -204,10 +203,17 @@ Khi `foo` đổi, only connection ID 1234 nhận invalidation frame. Dù RESP2 d
 
 ### 5.2. Pool nhiều data connections
 
-```text
-Data connection D1 ─┐
-Data connection D2 ─┼─ REDIRECT → invalidation connection I → process-local cache
-Data connection D3 ─┘
+```d2 title="Redirect invalidation về một connection dùng chung"
+direction: right
+d1: Data connection D1
+d2: Data connection D2
+d3: Data connection D3
+invalidation: Invalidation connection I
+cache: Process-local cache
+d1 -> invalidation: REDIRECT
+d2 -> invalidation: REDIRECT
+d3 -> invalidation: REDIRECT
+invalidation -> cache: Invalidate
 ```
 
 Mỗi D connection phải bật tracking với đúng current ID của I. Nếu pool tạo connection mới, hook `onConnect` phải cấu hình tracking.
@@ -601,18 +607,28 @@ Production cần single-flight, negative entries, error handling, metrics và pr
 
 ### 14.1. Read flow
 
-```mermaid
-flowchart TD
-    A[Read key] --> B{Tracking healthy?}
-    B -->|No| R[Read Redis, không populate L1]
-    B -->|Yes| C{L1 hit và chưa TTL?}
-    C -->|Yes| H[Return local]
-    C -->|No| G[Mark generation và GET Redis]
-    G --> V{Bị invalidated trong lúc load?}
-    V -->|Yes| N[Không cache response]
-    V -->|No| P[Populate bounded L1]
-    P --> H
-    N --> R2[Return hoặc retry theo policy]
+```d2 title="14.1. Read flow"
+direction: down
+A: "Read key"
+B: "Tracking healthy?" { shape: diamond }
+R: "Read Redis, không populate L1" { icon: https://icons.d2lang.com/dev/redis.svg }
+C: "L1 hit và chưa TTL?" { shape: diamond }
+H: "Return local"
+G: "Mark generation và GET Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+V: "Bị invalidated trong lúc load?" { shape: diamond }
+N: "Không cache response"
+P: "Populate bounded L1"
+R2: "Return hoặc retry theo policy"
+A -> B
+B -> R: "No"
+B -> C: "Yes"
+C -> H: "Yes"
+C -> G: "No"
+G -> V
+V -> N: "Yes"
+V -> P: "No"
+P -> H
+N -> R2
 ```
 
 ---

@@ -27,25 +27,32 @@
 
 Ba worker cùng nhận job “đóng invoice tháng 6” vì broker delivery lại. Nếu cả ba cùng chạy:
 
-```text
-Worker A ─┐
-Worker B ─┼──> đọc trạng thái OPEN ──> tạo 3 invoice / gửi 3 email
-Worker C ─┘
+```d2 title="Duplicate delivery có thể tạo nhiều side effect"
+direction: right
+a: Worker A
+b: Worker B
+c: Worker C
+state: Cùng đọc trạng thái OPEN
+effect: Tạo 3 invoice / gửi 3 email
+a -> state
+b -> state
+c -> state
+state -> effect
 ```
 
 Distributed lock cố gắng đảm bảo tại một thời điểm chỉ một owner được vào critical section cho một resource.
 
-```mermaid
-sequenceDiagram
-    participant A as Worker A
-    participant R as Redis
-    participant B as Worker B
-    A->>R: SET lock:invoice:42 tokenA NX PX 10000
-    R-->>A: OK
-    B->>R: SET lock:invoice:42 tokenB NX PX 10000
-    R-->>B: nil
-    A->>A: Process invoice
-    A->>R: compare tokenA rồi DEL
+```d2 title="1. Vấn đề: nhiều process cùng vào critical section"
+shape: sequence_diagram
+A: "Worker A"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+B: "Worker B"
+A -> R: "SET lock:invoice:42 tokenA NX PX 10000"
+R -> A: "OK" { style.stroke-dash: 4 }
+B -> R: "SET lock:invoice:42 tokenB NX PX 10000"
+R -> B: "nil" { style.stroke-dash: 4 }
+A -> A: "Process invoice"
+A -> R: "compare tokenA rồi DEL"
 ```
 
 Nhưng lock không tự biến side effect thành exactly-once. Process có thể gửi email xong rồi chết trước khi ghi “đã gửi”. Vì vậy lock thường phải đi cùng unique constraint, idempotency key hoặc state machine durable.
@@ -145,12 +152,24 @@ T14 C acquire → B và C cùng chạy
 
 Đúng: chỉ xóa nếu value vẫn là token của mình.
 
-```lua
--- KEYS[1] lock key, ARGV[1] owner token
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
+So sánh hai bản Lua: bản trước xóa mù; bản sau kiểm tra token và xóa **trong cùng script atomic**. `KEYS[1]` là lock key, `ARGV[1]` là owner token.
+
+```code-diff
+title: Safe release bằng compare-and-delete
+language: lua
+view: split
+before:
+  label: Xóa mù — không an toàn
+  code: |-
+    return redis.call('DEL', KEYS[1])
+after:
+  label: Chỉ owner hiện tại được release
+  code: |-
+    -- KEYS[1] lock key, ARGV[1] owner token
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+      return redis.call('DEL', KEYS[1])
+    end
+    return 0
 ```
 
 Gọi bằng `EVALSHA`/Redis Function. `GET` rồi `DEL` ở client vẫn race vì key có thể đổi giữa hai command.
@@ -232,15 +251,15 @@ Luôn release best-effort trong `finally`, nhưng chỉ sau khi mọi side effec
 
 Fencing token là số tăng đơn điệu cấp mỗi lần acquire: 41, 42, 43... Resource chỉ chấp nhận write có token lớn hơn token cuối đã thấy.
 
-```mermaid
-sequenceDiagram
-    participant A as Client A token 41
-    participant B as Client B token 42
-    participant D as Protected DB/Storage
-    B->>D: UPDATE resource fencing=42
-    D-->>B: accepted
-    A->>D: UPDATE resource fencing=41 (đến muộn)
-    D-->>A: rejected: stale token
+```d2 title="7. Fencing token: bảo vệ tài nguyên phía sau"
+shape: sequence_diagram
+A: "Client A token 41"
+B: "Client B token 42"
+D: "Protected DB/Storage"
+B -> D: "UPDATE resource fencing=42"
+D -> B: "accepted" { style.stroke-dash: 4 }
+A -> D: "UPDATE resource fencing=41 (đến muộn)"
+D -> A: "rejected: stale token" { style.stroke-dash: 4 }
 ```
 
 Database pattern:
@@ -335,12 +354,23 @@ Redlock cố tránh single-primary failover race bằng N Redis master độc l�
 
 Release gửi compare-delete đến tất cả master.
 
-```text
-Client ─┬─ Redis A ✓
-        ├─ Redis B ✓     3/5 + trong validity → acquire
-        ├─ Redis C ✓
-        ├─ Redis D ✗
-        └─ Redis E ✗
+```d2 title="Redlock: đa số trong thời gian validity"
+direction: right
+client: Client
+a: Redis A — thành công
+b: Redis B — thành công
+c: Redis C — thành công
+d: Redis D — thất bại
+e: Redis E — thất bại
+result: "3/5 và còn trong validity\n→ acquire"
+client -> a
+client -> b
+client -> c
+client -> d: ✕ {style.stroke-dash: 4}
+client -> e: ✕ {style.stroke-dash: 4}
+a -> result
+b -> result
+c -> result
 ```
 
 ### 10.2. Redlock không tự giải quyết stale client

@@ -130,6 +130,15 @@ for (const [filename, meta] of fileMap) {
     }
   );
 
+  // Vendor known D2 icons: preserve catalog URLs in authored Markdown, but
+  // embed local SVGs at build time (no dependency on the icon host at runtime).
+  content = content.replace(/^```d2([^\n]*)\n([\s\S]*?)^```/gm, (_, meta, source) =>
+    '```d2' + meta + '\n' + source.replaceAll(
+      'https://icons.d2lang.com/dev/redis.svg',
+      '../../../public/icons/d2/redis.svg',
+    ) + '```'
+  );
+
   // 2d. Build frontmatter (Fumadocs uses title + description natively)
   const frontmatter = [
     '---',

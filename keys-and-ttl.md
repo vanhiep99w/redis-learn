@@ -407,9 +407,14 @@ Redis không có một timer riêng cho từng key. Nếu có 100 triệu key TT
 
 Hai cấu trúc liên quan (process model đầy đủ hơn ở [Redis Architecture](./redis-architecture.md)):
 
-```text
-keyspace dict ──▶ key → value (redisObject)
-expires dict  ──▶ key → expire_at (ms absolute)
+```d2 title="Keyspace dictionary và expires dictionary"
+direction: right
+keyspace: Keyspace dict
+expires: Expires dict
+value: key → value (redisObject)
+deadline: key → expire_at (ms absolute)
+keyspace -> value
+expires -> deadline
 ```
 
 Hai cơ chế dọn:
@@ -419,23 +424,33 @@ Hai cơ chế dọn:
 
 ### Lazy expiration
 
-```text
-GET session:abc
-→ lookup key trong keyspace dict
-→ lookup expire_at trong expires dict
-→ nếu expired: xóa cả hai entry, trả nil
-→ nếu chưa: trả value
+```d2 title="Lazy expire khi GET session"
+direction: down
+get: "GET session:abc"
+lookup: Lookup key trong keyspace dict
+ttl: Lookup expire_at trong expires dict
+check: Đã expired? {shape: diamond}
+delete: Xóa cả hai entry và trả nil
+result: Trả value
+get -> lookup -> ttl -> check
+check -> delete: Có
+check -> result: Không
 ```
 
 Ưu điểm: rẻ, không timer per-key. Nhược: key hết hạn nhưng không ai đọc có thể còn chiếm RAM.
 
 ### Active expiration
 
-```text
-serverCron (~ mỗi 100ms)
-→ sample ngẫu nhiên keys trong expires dict
-→ xóa key đã hết hạn
-→ nếu % expired cao → sample thêm, vẫn trong time limit mỗi chu kỳ
+```d2 title="Active expire lấy mẫu trong time budget"
+direction: down
+cron: serverCron (~ mỗi 100 ms)
+sample: Sample keys ngẫu nhiên trong expires dict
+delete: Xóa key đã hết hạn
+more: Tỷ lệ expired cao và còn time budget? {shape: diamond}
+done: Kết thúc chu kỳ
+cron -> sample -> delete -> more
+more -> sample: Có
+more -> done: Không
 ```
 
 Active expire dọn key “mồ côi” không ai truy cập. Chu kỳ ~10Hz + time budget → **không** xóa hết mọi key expired trong một nhịp; memory có thể giảm trễ vài ms đến vài giây tùy volume.
@@ -570,11 +585,13 @@ Nếu cache key biến mất cùng lúc, hệ thống có chịu được không
 
 Nếu rất nhiều clients cùng request một key hot vừa expire, tất cả miss cache và cùng query DB.
 
-```text
-T0: product:123 expire
-T1: 10,000 requests GET product:123
-T2: 10,000 cache misses
-T3: 10,000 DB queries
+```d2 title="Hết hạn đồng thời có thể gây stampede"
+direction: right
+n0: "T0: product:123 expire"
+n1: "T1: 10.000 request GET product:123"
+n2: "T2: 10.000 cache miss"
+n3: "T3: 10.000 DB query"
+n0 -> n1 -> n2 -> n3
 ```
 
 ### TTL jitter
@@ -634,20 +651,31 @@ Chỉ client lấy được lock mới rebuild cache. Client khác chờ hoặc 
 
 Một key có thể đi qua lifecycle:
 
-```mermaid
-flowchart TD
-    A[Key chưa tồn tại] --> B[SET/HSET/LPUSH tạo key]
-    B --> C{Có TTL?}
-    C -- Có --> D[Key volatile]
-    C -- Không --> E[Key persistent]
-    D --> F[Access bình thường]
-    E --> F
-    F --> G{TTL hết?}
-    G -- Có --> H[Lazy/active expire xóa key]
-    G -- Không --> I{Memory vượt maxmemory?}
-    I -- Có --> J[Eviction policy có thể xóa key]
-    I -- Không --> F
-    F --> K[DEL/UNLINK explicit delete]
+```d2 title="Key lifecycle: từ tạo đến xóa"
+direction: down
+A: "Key chưa tồn tại"
+B: "SET/HSET/LPUSH tạo key"
+C: "Có TTL?" { shape: diamond }
+D: "Key volatile"
+E: "Key persistent"
+F: "Access bình thường"
+G: "TTL hết?" { shape: diamond }
+H: "Lazy/active expire xóa key"
+I: "Memory vượt maxmemory?" { shape: diamond }
+J: "Eviction policy có thể xóa key"
+K: "DEL/UNLINK explicit delete"
+A -> B
+B -> C
+C -> D: "Có"
+C -> E: "Không"
+D -> F
+E -> F
+F -> G
+G -> H: "Có"
+G -> I: "Không"
+I -> J: "Có"
+I -> F: "Không"
+F -> K
 ```
 
 ### Các cách key biến mất

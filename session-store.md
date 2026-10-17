@@ -38,14 +38,19 @@ Pod A restart → toàn bộ session trên Pod A biến mất
 
 Sticky session giảm một phần vấn đề nhưng làm cân bằng tải và deploy khó hơn. Redis tạo một shared session store có TTL, tốc độ thấp và atomic operations:
 
-```mermaid
-graph LR
-    B[Browser] -->|Cookie: sid=random| L[Load Balancer]
-    L --> A1[App Pod A]
-    L --> A2[App Pod B]
-    A1 --> R[(Redis Session Store)]
-    A2 --> R
-    R -->|userId, roles, timestamps| A1
+```d2 title="1. Vấn đề: HTTP stateless nhưng đăng nhập có trạng thái"
+direction: right
+B: "Browser"
+L: "Load Balancer"
+A1: "App Pod A"
+A2: "App Pod B"
+R: "Redis Session Store" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+B -> L: "Cookie: sid=random"
+L -> A1
+L -> A2
+A1 -> R
+A2 -> R
+R -> A1: "userId, roles, timestamps"
 ```
 
 > [!IMPORTANT]
@@ -57,41 +62,40 @@ graph LR
 
 ### 2.1. Login flow
 
-```mermaid
-sequenceDiagram
-    participant U as Browser
-    participant A as Auth Service
-    participant D as User DB
-    participant R as Redis
-
-    U->>A: POST /login + credentials
-    A->>D: Verify user/password/MFA
-    D-->>A: user + auth version
-    A->>A: Generate 256-bit random session ID
-    A->>R: SET sess:<hash(sid)> payload EX 1800
-    R-->>A: OK
-    A-->>U: Set-Cookie sid=... với HttpOnly, Secure, SameSite=Lax
+```d2 title="2.1. Login flow"
+shape: sequence_diagram
+U: "Browser"
+A: "Auth Service"
+D: "User DB"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+U -> A: "POST /login + credentials"
+A -> D: "Verify user/password/MFA"
+D -> A: "user + auth version" { style.stroke-dash: 4 }
+A -> A: "Generate 256-bit random session ID"
+A -> R: "SET sess:<hash(sid)> payload EX 1800"
+R -> A: "OK" { style.stroke-dash: 4 }
+A -> U: "Set-Cookie sid=... với HttpOnly, Secure, SameSite=Lax" { style.stroke-dash: 4 }
 ```
 
 ### 2.2. Authenticated request flow
 
-```mermaid
-sequenceDiagram
-    participant U as Browser
-    participant A as Application
-    participant R as Redis
-
-    U->>A: GET /account + sid cookie
-    A->>A: Parse and validate cookie format
-    A->>R: GET sess:<hash(sid)>
-    alt Session tồn tại và hợp lệ
-        R-->>A: userId, expiry, roles/version
-        A->>A: Authorize request
-        A-->>U: 200 response
-    else Missing/expired/revoked
-        R-->>A: nil
-        A-->>U: 401 + clear cookie
-    end
+```d2 title="2.2. Authenticated request flow"
+shape: sequence_diagram
+U: "Browser"
+A: "Application"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+U -> A: "GET /account + sid cookie"
+A -> A: "Parse and validate cookie format"
+A -> R: "GET sess:<hash(sid)>"
+branch_1: "alt: Session tồn tại và hợp lệ (nhánh thay thế)" {
+  R -> A: "userId, expiry, roles/version" { style.stroke-dash: 4 }
+  A -> A: "Authorize request"
+  A -> U: "200 response" { style.stroke-dash: 4 }
+}
+branch_2: "else: Missing/expired/revoked (nhánh thay thế)" {
+  R -> A: "nil" { style.stroke-dash: 4 }
+  A -> U: "401 + clear cookie" { style.stroke-dash: 4 }
+}
 ```
 
 Tách hai khái niệm:
@@ -252,18 +256,17 @@ Cookie `Max-Age`/`Expires` và Redis TTL nên nhất quán, nhưng Redis là quy
 
 **Session fixation** xảy ra khi attacker biết/chọn session ID trước lúc victim login, rồi session đó được nâng thành authenticated session. Cách phòng vệ: luôn rotate ID sau login và sau thay đổi privilege.
 
-```mermaid
-sequenceDiagram
-    participant U as Browser
-    participant A as App
-    participant R as Redis
-
-    U->>A: Login với anonymous sid_old
-    A->>A: Verify credentials
-    A->>A: Generate sid_new
-    A->>R: Create sess:<sid_new> authenticated
-    A->>R: DEL sess:<sid_old>
-    A-->>U: Replace cookie bằng sid_new
+```d2 title="6. Login, session rotation và chống fixation"
+shape: sequence_diagram
+U: "Browser"
+A: "App"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+U -> A: "Login với anonymous sid_old"
+A -> A: "Verify credentials"
+A -> A: "Generate sid_new"
+A -> R: "Create sess:<sid_new> authenticated"
+A -> R: "DEL sess:<sid_old>"
+A -> U: "Replace cookie bằng sid_new" { style.stroke-dash: 4 }
 ```
 
 Các thời điểm nên rotate:

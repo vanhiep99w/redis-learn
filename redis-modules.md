@@ -42,19 +42,27 @@ Redis Modules API cho native extension đăng ký:
 - Hooks vào keyspace, replication, ACL, events và timers.
 - Background/threaded work theo API cho phép.
 
-```mermaid
-graph TD
-    C[Redis clients] --> P[Redis command/protocol layer]
-    P --> Core[Core data types]
-    P --> J[JSON]
-    P --> S[Search]
-    P --> T[Time Series]
-    P --> B[Probabilistic]
-    Core --> R[(Redis memory, persistence, replication)]
-    J --> R
-    S --> R
-    T --> R
-    B --> R
+```d2 title="1. Từ key-value server đến data platform mở rộng"
+direction: down
+C: "Redis clients" { icon: https://icons.d2lang.com/dev/redis.svg }
+P: "Redis command/protocol layer" { icon: https://icons.d2lang.com/dev/redis.svg }
+Core: "Core data types"
+J: "JSON"
+S: "Search"
+T: "Time Series"
+B: "Probabilistic"
+R: "Redis memory, persistence, replication" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+C -> P
+P -> Core
+P -> J
+P -> S
+P -> T
+P -> B
+Core -> R
+J -> R
+S -> R
+T -> R
+B -> R
 ```
 
 > [!IMPORTANT]
@@ -332,14 +340,21 @@ Redis 8 mang nhiều Search improvements và có breaking validation/default cha
 
 Embedding biến text/image/item thành vector float nhiều chiều. Similarity search tìm vectors gần query theo cosine/L2/inner product tùy index.
 
-```mermaid
-graph LR
-    T[Product text] --> E[Embedding model]
-    E --> V[Vector 768 dimensions]
-    V --> R[(Redis vector index)]
-    Q[User query] --> QE[Same embedding model]
-    QE --> R
-    R --> K[Top K similar products]
+```d2 title="7.1. Vector là gì"
+direction: right
+T: "Product text"
+E: "Embedding model"
+V: "Vector 768 dimensions"
+R: "Redis vector index" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+Q: "User query"
+QE: "Same embedding model"
+K: "Top K similar products"
+T -> E
+E -> V
+V -> R
+Q -> QE
+QE -> R
+R -> K
 ```
 
 ### 7.2. Redis Search vector fields
@@ -555,14 +570,23 @@ IoT network gửi trễ. Chọn duplicate policy và retention/out-of-order beha
 
 Case IoT commerce:
 
-```mermaid
-graph TD
-    P[Product JSON] --> I[Search index]
-    Q[Search queries] --> I
-    Q --> C[Count-Min / Top-K query trends]
-    D[Device telemetry] --> T[Time Series raw]
-    T --> A[Compacted hourly series]
-    U[Unique visitors] --> H[HyperLogLog]
+```d2 title="10. Kết hợp JSON, Search, probabilistic và time series"
+direction: down
+P: "Product JSON"
+I: "Search index"
+Q: "Search queries"
+C: "Count-Min / Top-K query trends"
+D: "Device telemetry"
+T: "Time Series raw"
+A: "Compacted hourly series"
+U: "Unique visitors"
+H: "HyperLogLog"
+P -> I
+Q -> I
+Q -> C
+D -> T
+T -> A
+U -> H
 ```
 
 ### 10.1. Product catalog
@@ -630,11 +654,19 @@ JSON document, Time Series key, Bloom filter key nằm một hash slot. Single-k
 
 Distributed Search capability/topology phụ thuộc Redis distribution. Query fan-out shards, merge top K/aggregations và network cost. Một query broad có thể chạm mọi shard:
 
-```text
-coordinator → shard 1 local top K
-            → shard 2 local top K
-            → shard N local top K
-            → merge global result
+```d2 title="Coordinator merge kết quả của các shard"
+direction: right
+coordinator: Coordinator
+s1: Shard 1 local top K
+s2: Shard 2 local top K
+sn: Shard N local top K
+merge: Merge global result
+coordinator -> s1
+coordinator -> s2
+coordinator -> sn
+s1 -> merge
+s2 -> merge
+sn -> merge
 ```
 
 Latency phụ thuộc slowest shard và merge. Filter selective/index design rất quan trọng.

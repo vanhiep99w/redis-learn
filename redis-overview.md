@@ -39,14 +39,14 @@ Redis = data structures + RAM + network server + atomic commands
 
 Không nên hiểu Redis chỉ là “Map nằm trong memory”. Redis là một server độc lập, nhận command qua TCP, quản lý memory, TTL, persistence, replication, high availability và cluster routing.
 
-```text
-┌──────────────┐       TCP/RESP       ┌──────────────────────────┐
-│ Application  │ ───────────────────▶ │ Redis Server             │
-│              │ ◀─────────────────── │                          │
-└──────────────┘       response       │ keyspace: key → value    │
-                                      │ TTL / eviction / AOF/RDB │
-                                      │ replication / cluster    │
-                                      └──────────────────────────┘
+```d2 title="Application giao tiếp với Redis qua TCP/RESP"
+direction: right
+app: Application
+redis: "Redis Server\nkeyspace: key → value\nTTL / eviction / AOF / RDB\nreplication / cluster" {
+  icon: https://icons.d2lang.com/dev/redis.svg
+}
+app -> redis: TCP/RESP
+redis -> app: response
 ```
 
 > [!IMPORTANT]
@@ -58,11 +58,29 @@ Không nên hiểu Redis chỉ là “Map nằm trong memory”. Redis là một
 
 Tên Redis là viết tắt của **REmote DIctionary Server**. “Dictionary” ở đây có thể hiểu là map/hash table từ key sang value.
 
-Ví dụ đơn giản:
+Ví dụ đơn giản, giả sử đã mở `redis-cli` trên Redis local dùng để học. Đây là transcript minh họa; website không thực thi command:
 
-```bash
-SET user:1:name "Hiep"
-GET user:1:name
+```terminal-session
+title: Ghi và đọc một String
+context:
+  kind: local
+  label: redis-cli / Redis demo
+steps:
+  - id: set
+    title: Ghi tên người dùng
+    prompt: "127.0.0.1:6379>"
+    command: SET user:1:name "Hiep"
+    warning: SET ghi đè key nếu đã tồn tại. Chỉ thử trên Redis demo.
+    outputs:
+      - stream: stdout
+        text: OK
+  - id: get
+    title: Đọc lại giá trị
+    prompt: "127.0.0.1:6379>"
+    command: GET user:1:name
+    outputs:
+      - stream: stdout
+        text: '"Hiep"'
 ```
 
 Nhưng Redis không dừng ở `GET/SET`. Redis cho phép thao tác trực tiếp lên data structure ở server:
@@ -93,8 +111,13 @@ Nhiều người học Redis từ cache, nhưng Redis rộng hơn cache.
 
 ### Redis như cache
 
-```text
-App → Redis cache → Database
+```d2 title="Cache-aside: application điều phối cache và database"
+direction: right
+app: App
+cache: Redis cache {icon: https://icons.d2lang.com/dev/redis.svg}
+db: Database {shape: cylinder}
+app -> cache: GET / SET với TTL
+app -> db: Query khi cache miss
 ```
 
 Nếu cache hit, app tránh query database. Nếu cache miss, app query DB rồi ghi lại Redis với TTL.

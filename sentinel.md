@@ -40,28 +40,19 @@ Cluster sharding dữ liệu + HA theo từng shard.
 
 Một mô hình Sentinel cơ bản:
 
-```text
-                 ┌──────────────────────┐
-                 │      App Clients     │
-                 │ Sentinel-aware client│
-                 └──────────┬───────────┘
-                            │ hỏi master hiện tại
-                            ▼
-            ┌────────────────────────────────┐
-            │ Sentinel quorum: S1, S2, S3    │
-            └──────────┬───────────┬─────────┘
-                       │ monitor   │ coordinate
-                       ▼           ▼
-                 ┌──────────┐   ┌──────────┐
-                 │ Master   │──▶│ Replica  │
-                 │ Redis A  │   │ Redis B  │
-                 └────┬─────┘   └──────────┘
-                      │
-                      ▼
-                 ┌──────────┐
-                 │ Replica  │
-                 │ Redis C  │
-                 └──────────┘
+```d2 title="Sentinel discovery, monitoring và replication"
+direction: down
+app: App clients — Sentinel-aware client
+sentinels: Sentinel quorum S1 / S2 / S3
+master: Master Redis A
+b: Replica Redis B
+c: Replica Redis C
+app -> sentinels: Hỏi master hiện tại
+sentinels -> master: Monitor
+sentinels -> b: Monitor / coordinate
+sentinels -> c: Monitor / coordinate
+master -> b: Replication
+master -> c: Replication
 ```
 
 Khi master A chết, Sentinels đạt đồng thuận, chọn B hoặc C, promote thành master mới, rồi client lấy địa chỉ mới từ Sentinel.
@@ -118,14 +109,23 @@ Một deployment production tối thiểu nên có:
 - Ít nhất 3 Sentinel process.
 - Client library hỗ trợ Sentinel.
 
-```text
-Box 1                         Box 2                         Box 3
-┌────────────────────┐        ┌────────────────────┐        ┌────────────────────┐
-│ Redis Master M1    │        │ Redis Replica R2   │        │ Redis Replica R3   │
-│ Sentinel S1        │        │ Sentinel S2        │        │ Sentinel S3        │
-└─────────┬──────────┘        └─────────┬──────────┘        └─────────┬──────────┘
-          │                             │                             │
-          └────────────── gossip / vote / monitor ────────────────────┘
+```d2 title="Ba Sentinel trên ba failure domain"
+direction: right
+box1: Box 1 {
+  redis: Redis Master M1
+  sentinel: Sentinel S1
+}
+box2: Box 2 {
+  redis: Redis Replica R2
+  sentinel: Sentinel S2
+}
+box3: Box 3 {
+  redis: Redis Replica R3
+  sentinel: Sentinel S3
+}
+box1.sentinel <-> box2.sentinel: Gossip / vote / monitor
+box2.sentinel <-> box3.sentinel: Gossip / vote / monitor
+box1.sentinel <-> box3.sentinel: Gossip / vote / monitor
 ```
 
 Sentinel process thường chạy trên cùng host với Redis node hoặc trên host app/client, miễn là:
@@ -238,14 +238,17 @@ Failover không chỉ cần quorum. Để thực sự tiến hành failover, m�
 
 Với 2 Sentinel, majority là 2. Nếu một Sentinel chết hoặc bị partition, Sentinel còn lại không đạt majority để failover.
 
-```text
-Box 1                    Box 2
-┌──────────────┐         ┌──────────────┐
-│ Master M1    │         │ Replica R1   │
-│ Sentinel S1  │         │ Sentinel S2  │
-└──────┬───────┘         └──────┬───────┘
-       │                        │
-       └──── network ───────────┘
+```d2 title="Hai Sentinel không chịu được mất một node"
+direction: right
+box1: Box 1 {
+  master: Master M1
+  s1: Sentinel S1
+}
+box2: Box 2 {
+  replica: Replica R1
+  s2: Sentinel S2
+}
+box1.s1 <-> box2.s2: Network
 ```
 
 Nếu Box 1 chết, S1 cũng chết. S2 còn sống nhưng chỉ có 1/2 vote, không đạt majority. Kết quả: không failover.
@@ -301,16 +304,25 @@ quorum = 2
 
 ODOWN mới là điều kiện để bắt đầu failover.
 
-```mermaid
-flowchart TD
-    A[Sentinel ping master] --> B{Không phản hồi quá down-after?}
-    B -- Không --> C[Master vẫn OK]
-    B -- Có --> D[Sentinel đánh dấu SDOWN]
-    D --> E[Hỏi các Sentinel khác]
-    E --> F{Đủ quorum cùng đồng ý?}
-    F -- Không --> G[Chưa failover]
-    F -- Có --> H[Master ODOWN]
-    H --> I[Bầu leader failover]
+```d2 title="Objective down: ODOWN"
+direction: down
+A: "Sentinel ping master" { icon: https://icons.d2lang.com/dev/redis.svg }
+B: "Không phản hồi quá down-after?" { shape: diamond }
+C: "Master vẫn OK" { icon: https://icons.d2lang.com/dev/redis.svg }
+D: "Sentinel đánh dấu SDOWN"
+E: "Hỏi các Sentinel khác"
+F: "Đủ quorum cùng đồng ý?" { shape: diamond }
+G: "Chưa failover"
+H: "Master ODOWN" { icon: https://icons.d2lang.com/dev/redis.svg }
+I: "Bầu leader failover"
+A -> B
+B -> C: "Không"
+B -> D: "Có"
+D -> E
+E -> F
+F -> G: "Không"
+F -> H: "Có"
+H -> I
 ```
 
 ---
@@ -330,10 +342,15 @@ quorum = 2
 
 Sentinel định kỳ ping Redis nodes và trao đổi hello message với nhau.
 
-```text
-S1 ── PING ─▶ M1
-S2 ── PING ─▶ M1
-S3 ── PING ─▶ M1
+```d2 title="Sentinel kiểm tra master bằng PING"
+direction: right
+s1: S1
+s2: S2
+s3: S3
+master: M1
+s1 -> master: PING
+s2 -> master: PING
+s3 -> master: PING
 ```
 
 ### Bước 2: Master không phản hồi
@@ -396,39 +413,47 @@ Sentinels update config. Client hỏi master mới sẽ nhận IP/port mới.
 
 Nếu M1 quay lại, Sentinel sẽ reconfigure nó thành replica của master mới.
 
-```text
-Trước failover:
-M1 ─▶ R2, R3
-
-Sau failover:
-R2 promoted thành M2
-R3 ─▶ M2
-M1 nếu quay lại ─▶ M2
+```d2 mode=steps title="Topology trước và sau failover"
+direction: down
+m1: M1 — master
+r2: R2 — replica
+r3: R3 — replica
+m1 -> r2: Replication
+m1 -> r3: Replication
+steps: {
+  promoted: {
+    m1: M1 — replica nếu quay lại
+    r2: R2 được promote thành M2
+    (m1 -> r2)[0]: null
+    (m1 -> r3)[0]: null
+    r2 -> r3: Replication
+    r2 -> m1: Replication sau rejoin
+  }
+}
 ```
 
-```mermaid
-sequenceDiagram
-    participant S1 as Sentinel leader
-    participant S2 as Sentinel
-    participant M as Old Master
-    participant R2 as Replica R2
-    participant R3 as Replica R3
-    participant C as Client
-
-    S1->>M: PING
-    S2->>M: PING
-    M--xS1: no response
-    M--xS2: no response
-    S1->>S2: is-master-down-by-addr?
-    S2-->>S1: yes
-    S1->>S2: request vote for failover epoch
-    S2-->>S1: vote granted
-    S1->>R2: REPLICAOF NO ONE
-    R2-->>S1: OK, now master
-    S1->>R3: REPLICAOF R2 6379
-    R3-->>S1: OK
-    C->>S1: SENTINEL get-master-addr-by-name mymaster
-    S1-->>C: R2 address
+```d2 title="Bước 9: Master cũ quay lại"
+shape: sequence_diagram
+S1: "Sentinel leader"
+S2: "Sentinel"
+M: "Old Master" { icon: https://icons.d2lang.com/dev/redis.svg }
+R2: "Replica R2" { icon: https://icons.d2lang.com/dev/redis.svg }
+R3: "Replica R3" { icon: https://icons.d2lang.com/dev/redis.svg }
+C: "Client"
+S1 -> M: "PING"
+S2 -> M: "PING"
+M -> S1: "✕ no response" { style.stroke-dash: 4; style.stroke: "#dc2626" }
+M -> S2: "✕ no response" { style.stroke-dash: 4; style.stroke: "#dc2626" }
+S1 -> S2: "is-master-down-by-addr?"
+S2 -> S1: "yes" { style.stroke-dash: 4 }
+S1 -> S2: "request vote for failover epoch"
+S2 -> S1: "vote granted" { style.stroke-dash: 4 }
+S1 -> R2: "REPLICAOF NO ONE"
+R2 -> S1: "OK, now master" { style.stroke-dash: 4 }
+S1 -> R3: "REPLICAOF R2 6379"
+R3 -> S1: "OK" { style.stroke-dash: 4 }
+C -> S1: "SENTINEL get-master-addr-by-name mymaster"
+S1 -> C: "R2 address" { style.stroke-dash: 4 }
 ```
 
 ---
@@ -496,10 +521,14 @@ Sentinel-aware client thường cần config:
 
 Client không hard-code IP master. Thay vào đó:
 
-```text
-App → Sentinel: master của mymaster là ai?
-Sentinel → App: 10.0.0.12:6379
-App → Redis 10.0.0.12:6379: gửi command
+```d2 title="Client hỏi Sentinel rồi kết nối thẳng Redis"
+shape: sequence_diagram
+app: App
+sentinel: Sentinel
+redis: "Redis 10.0.0.12:6379"
+app -> sentinel: Master của mymaster là ai?
+sentinel -> app: 10.0.0.12:6379
+app -> redis: Gửi command
 ```
 
 Command Sentinel tương ứng:
@@ -723,12 +752,13 @@ Trong production hiện đại, thường dùng monitoring/log scraping hơn là
 
 ### Topology 3 box cơ bản
 
-```text
-Box A                 Box B                 Box C
-┌─────────────┐       ┌─────────────┐       ┌─────────────┐
-│ Redis M1    │       │ Redis R2    │       │ Redis R3    │
-│ Sentinel S1 │       │ Sentinel S2 │       │ Sentinel S3 │
-└─────────────┘       └─────────────┘       └─────────────┘
+```d2 title="Co-locate Redis và Sentinel trên ba box"
+boxes: Ba failure domain {
+  grid-columns: 3
+  a: "Box A\nRedis M1\nSentinel S1"
+  b: "Box B\nRedis R2\nSentinel S2"
+  c: "Box C\nRedis R3\nSentinel S3"
+}
 ```
 
 Config:
@@ -749,19 +779,21 @@ Nhược điểm:
 
 ### Topology Sentinel trên app nodes
 
-```text
-Redis Box 1           Redis Box 2
-┌─────────────┐       ┌─────────────┐
-│ Master M1   │       │ Replica R1  │
-└──────┬──────┘       └──────┬──────┘
-       │                     │
-       └──────────┬──────────┘
-                  │
-App Box A      App Box B      App Box C
-┌────────┐     ┌────────┐     ┌────────┐
-│ App    │     │ App    │     │ App    │
-│ S1     │     │ S2     │     │ S3     │
-└────────┘     └────────┘     └────────┘
+```d2 title="Sentinel chạy cùng app thay vì Redis box"
+direction: down
+redis: Redis boxes {
+  master: Box 1 — Master M1
+  replica: Box 2 — Replica R1
+  master -> replica: Replication
+}
+apps: App boxes {
+  a: Box A — App + Sentinel S1
+  b: Box B — App + Sentinel S2
+  c: Box C — App + Sentinel S3
+}
+apps.a -> redis: Monitor / discovery
+apps.b -> redis: Monitor / discovery
+apps.c -> redis: Monitor / discovery
 ```
 
 Phù hợp khi chỉ có 2 Redis boxes nhưng có 3 app boxes.
@@ -797,15 +829,14 @@ Sentinel dùng Redis replication bên dưới, mà replication mặc định là
 
 Luồng write bình thường:
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant M as Master
-    participant R as Replica
-
-    C->>M: SET k v
-    M-->>C: OK
-    M-->>R: replication stream
+```d2 title="Cửa sổ mất write"
+shape: sequence_diagram
+C: "Client"
+M: "Master" { icon: https://icons.d2lang.com/dev/redis.svg }
+R: "Replica" { icon: https://icons.d2lang.com/dev/redis.svg }
+C -> M: "SET k v"
+M -> C: "OK" { style.stroke-dash: 4 }
+M -> R: "replication stream" { style.stroke-dash: 4 }
 ```
 
 Nếu M trả `OK` rồi chết trước khi R nhận write, Sentinel có thể promote R và write đó mất.

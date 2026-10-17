@@ -67,3 +67,60 @@ Tài liệu học Redis tiếng Việt — Next.js + Fumadocs, deploy trên Clou
 - [x] [Monitoring](monitoring.md) - INFO metrics, redis_exporter + Prometheus + Grafana, alerts quan trọng
 - [x] [Backup & Restore](backup-restore.md) - RDB backup strategies, restore procedures, disaster recovery
 - [x] [Troubleshooting](troubleshooting.md) - Common issues, OOM, connection limits, debug checklist
+
+---
+
+## Phát triển webapp
+
+Cần **Node.js 22+**. Nội dung gốc là các file `.md` ở root; không sửa `content/docs/` vì thư mục này được sinh lại từ README.
+
+```bash
+npm ci
+npm run dev
+npm run build       # static export → dist/
+npm run typecheck
+```
+
+### Diagram và component docs-kit
+
+Webapp dùng [`@vanhiep99w/docs-kit`](https://www.npmjs.com/package/@vanhiep99w/docs-kit). D2 render thành SVG light/dark **lúc build**; không đưa compiler/WASM vào browser. Nút **Explore diagram** tải viewer khi cần để zoom, pan, mở rộng, xem/copy D2 và tải SVG. Có thể đọc diagram/source khi tắt JavaScript.
+
+````md
+```d2 title="Application đọc cache"
+direction: right
+app: Application
+redis: Redis {icon: https://icons.d2lang.com/dev/redis.svg}
+db: Database {shape: cylinder}
+app -> redis: GET / SET với TTL
+app -> db: Query khi cache miss
+```
+````
+
+- Thêm `mode=steps` cùng `steps: { ... }` khi cần diễn giải nhiều trạng thái; xem [Cluster](./cluster.md) và [Sentinel](./sentinel.md).
+- Icon từ [D2 Icons](https://icons.d2lang.com/) nên lưu local và ghi nguồn. Icon Redis đã được vendor trong `public/icons/d2/`; script prepare rewrite URL trong fence D2, plugin nhúng icon vào SVG. Thêm icon mới phải bổ sung mapping tương ứng.
+- Giữ log, RESP payload, công thức và text cần căn vị trí ở dạng text. Không biến bảng dữ liệu hay mọi ví dụ ngắn thành diagram.
+- Cache D2 nằm ở `.next/cache/docs-kit/d2`, không deploy cache. Trên Cloudflare Pages, bật **Build cache** trong dashboard; kiểm tra log restore cache thực tế.
+- Chỉ build D2/descriptor tin cậy trong repository. SVG được nhúng trực tiếp; các component không thực thi Redis command, Lua hay shell.
+
+Các fence bổ sung đã đăng ký, không cần JSX/import riêng trong từng bài:
+
+| Fence | Dùng khi | Ví dụ trong repo |
+|-------|----------|------------------|
+| `terminal-session` | Transcript từng command/output, copy không kèm prompt | [Overview](./redis-overview.md), [Transactions](./transactions.md) |
+| `code-diff` | So sánh code/config trước và sau | [Safe release lock](./distributed-lock.md) |
+| `code-walkthrough` | Đọc code theo bước và highlight range | [Redis Function](./lua-scripting.md) |
+| `span-waterfall` | Timeline latency; ghi rõ minh họa hay đo thực tế | [Slow Log & Latency](./slow-log-latency.md) |
+
+Không bật Source Explorer hoặc Protocol Exchange chỉ để có thêm component: hiện chưa có project source registry hoặc transcript HTTP phù hợp. Chỉ tích hợp khi có nội dung thực sự cần chúng.
+
+### Kiểm thử static export và trình duyệt
+
+```bash
+npm run build
+npx playwright install chromium     # lần đầu, nếu chưa có browser
+npm run test:browser
+# Hoặc dùng Chrome đã cài trên máy:
+CHROME_PATH=/usr/bin/google-chrome npm run test:browser
+```
+
+Smoke tests kiểm tra mọi fence trong static export, D2 zoom/download/theme/steps, copy command, walkthrough/diff/waterfall, mobile và fallback không JavaScript. Chạy lại build trước khi test nếu nội dung thay đổi.

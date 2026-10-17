@@ -28,13 +28,24 @@
 
 Rate limiting trả lời: **một identity được thực hiện bao nhiêu hành động trong một khoảng thời gian**. Mục tiêu không chỉ chống DDoS; nó còn bảo vệ database, giữ công bằng giữa tenant, enforce quota và giới hạn chi phí API bên thứ ba.
 
-```text
-Không rate limit
-Client lỗi retry 50.000 req/s → API → DB pool đầy → mọi user lỗi
-
-Có rate limit
-Client lỗi → limiter chỉ cho 100 req/s → phần dư nhận 429
-                                    → hệ thống còn phục vụ user khác
+```d2 title="Rate limiter bảo vệ backend khi client retry lỗi"
+direction: right
+unlimited: Không rate limit {
+  client: Client lỗi retry 50.000 req/s
+  api: API
+  db: DB pool đầy
+  error: Mọi user lỗi
+  client -> api -> db -> error
+}
+limited: Có rate limit {
+  client: Client lỗi
+  limiter: Limiter — chỉ cho 100 req/s
+  reject: Phần dư nhận 429
+  healthy: Hệ thống còn phục vụ user khác
+  client -> limiter
+  limiter -> reject: Vượt limit
+  limiter -> healthy: Trong limit
+}
 ```
 
 Rate limiter không thay thế authentication, WAF, concurrency limit hay backpressure. Rate đo “bao nhiêu trong thời gian”; concurrency limit đo “bao nhiêu đang chạy cùng lúc”. Endpoint 1 request tốn 30 giây có thể cần cả hai.
@@ -77,12 +88,16 @@ limiter lỗi thì fail-open tối đa 30 giây nhưng có local emergency limit
 
 Redis có counter atomic, TTL, Sorted Set và server-side Lua/Functions. Tất cả application instance nhìn cùng state:
 
-```mermaid
-graph LR
-    C[Clients] --> G[API Gateway / Apps]
-    G -->|atomic check + consume| R[(Redis)]
-    G -->|allowed| S[Backend]
-    G -->|denied: 429| C
+```d2 title="3. Tại sao Redis phù hợp"
+direction: right
+C: "Clients"
+G: "API Gateway / Apps"
+R: "Redis" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+S: "Backend"
+C -> G
+G -> R: "atomic check + consume"
+G -> S: "allowed"
+G -> C: "denied: 429"
 ```
 
 Yêu cầu quan trọng là **check và consume phải atomic**. Nếu code `GET count`, so sánh, rồi `INCR`, 100 request song song đều có thể nhìn thấy 99 và cùng được phép.
@@ -147,20 +162,21 @@ Lưu timestamp của từng request trong Sorted Set. Mỗi check:
 3. Nếu dưới limit, thêm request hiện tại.
 4. Đặt TTL cleanup.
 
-```mermaid
-sequenceDiagram
-    participant A as API
-    participant R as Redis
-    A->>R: Lua(key, now, window, limit, uniqueId)
-    R->>R: ZREMRANGEBYSCORE old entries
-    R->>R: ZCARD
-    alt count < limit
-        R->>R: ZADD now uniqueId + PEXPIRE
-        R-->>A: allowed, remaining, reset
-    else full
-        R->>R: read oldest timestamp
-        R-->>A: denied, retryAfter
-    end
+```d2 title="5. Sliding window log"
+shape: sequence_diagram
+A: "API"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+A -> R: "Lua(key, now, window, limit, uniqueId)"
+R -> R: "ZREMRANGEBYSCORE old entries"
+R -> R: "ZCARD"
+branch_1: "alt: count < limit (nhánh thay thế)" {
+  R -> R: "ZADD now uniqueId + PEXPIRE"
+  R -> A: "allowed, remaining, reset" { style.stroke-dash: 4 }
+}
+branch_2: "else: full (nhánh thay thế)" {
+  R -> R: "read oldest timestamp"
+  R -> A: "denied, retryAfter" { style.stroke-dash: 4 }
+}
 ```
 
 Lua minh họa:
@@ -402,8 +418,15 @@ Một request có thể phải qua nhiều policy:
 3. Per-tenant enforce plan.
 4. Global endpoint bảo vệ backend.
 
-```text
-request → IP limit → user limit → tenant quota → global shedder → backend
+```d2 title="Rate limiting theo nhiều scope"
+direction: right
+n0: "Request"
+n1: "IP limit"
+n2: "User limit"
+n3: "Tenant quota"
+n4: "Global shedder"
+n5: "Backend"
+n0 -> n1 -> n2 -> n3 -> n4 -> n5
 ```
 
 Nếu consume tuần tự rồi policy cuối deny, các bucket trước đã mất token. Có thể chấp nhận (attempt cũng tiêu tài nguyên), hoặc dùng một Lua script multi-policy cùng slot. Đừng ép mọi global và per-user key cùng slot chỉ để atomic nếu tạo hot shard. Thường các tầng độc lập và “deny có thể vẫn consume” là policy hợp lệ nếu document.
@@ -553,13 +576,19 @@ Bắn 1.000 request đồng thời vào limit 100 và xác minh đúng policy (k
 
 ### 16.2. Thiết kế
 
-```mermaid
-graph TD
-    C[Client/API key] --> E[Edge IP limiter]
-    E --> T[Redis token bucket per API key]
-    T --> Q[Fixed monthly quota]
-    Q --> G[Global concurrency shedder]
-    G --> B[Backend]
+```d2 title="16.2. Thiết kế"
+direction: down
+C: "Client/API key"
+E: "Edge IP limiter"
+T: "Redis token bucket per API key" { icon: https://icons.d2lang.com/dev/redis.svg }
+Q: "Fixed monthly quota"
+G: "Global concurrency shedder"
+B: "Backend"
+C -> E
+E -> T
+T -> Q
+Q -> G
+G -> B
 ```
 
 - Edge local/IP limiter chống flood trước Redis.

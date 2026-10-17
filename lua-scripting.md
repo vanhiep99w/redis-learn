@@ -38,17 +38,16 @@ nếu stock >= quantity:
 
 Nếu logic chạy ở application, client khác có thể thay đổi stock giữa `GET` và `DECRBY`. `WATCH` giải quyết bằng optimistic retry nhưng cần nhiều round trip. Lua đưa logic đến nơi data đang nằm và thực thi như một đoạn atomic:
 
-```mermaid
-sequenceDiagram
-    participant A as Application
-    participant R as Redis Lua engine
-
-    A->>R: EVAL reserve.lua keys + arguments
-    R->>R: GET stock
-    R->>R: Validate stock
-    R->>R: DECRBY stock
-    R->>R: SET reservation
-    R-->>A: structured result
+```d2 title="1. Vấn đề: logic atomic cần nhiều round trip"
+shape: sequence_diagram
+A: "Application"
+R: "Redis Lua engine" { icon: https://icons.d2lang.com/dev/redis.svg }
+A -> R: "EVAL reserve.lua keys + arguments"
+R -> R: "GET stock"
+R -> R: "Validate stock"
+R -> R: "DECRBY stock"
+R -> R: "SET reservation"
+R -> A: "structured result" { style.stroke-dash: 4 }
 ```
 
 Lợi ích:
@@ -66,9 +65,12 @@ Cái giá: script chạy trên Redis event loop, nên code chậm có thể bloc
 
 Redis nhúng Lua 5.1. Khi script chạy, Redis không thực thi command khác xen vào script. Trạng thái bên ngoài chỉ thấy trước toàn bộ effects hoặc sau toàn bộ effects, không thấy giữa chừng.
 
-```text
-Client A command ──> [ Lua: GET → check → DECR → SET ] ──> Client B command
-                      không có interleaving ở giữa
+```d2 title="Không có interleaving trong lúc Lua chạy"
+direction: right
+a: Client A command
+lua: "Lua — atomic scope\nGET → check → DECR → SET\nKhông có interleaving ở giữa"
+b: Client B command
+a -> lua -> b
 ```
 
 ### 2.1. Atomicity đến từ blocking
@@ -306,10 +308,17 @@ Script cache không phải dataset và không persist. Nó có thể mất khi:
 
 Application phải xử lý `NOSCRIPT`:
 
-```text
-EVALSHA
-  ├─ success → done
-  └─ NOSCRIPT → SCRIPT LOAD/EVAL source → retry an toàn
+```d2 title="Xử lý NOSCRIPT an toàn"
+direction: down
+eval: EVALSHA
+result: Thành công? {shape: diamond}
+done: Done
+load: SCRIPT LOAD / EVAL source
+retry: Retry an toàn
+eval -> result
+result -> done: Có
+result -> load: NOSCRIPT
+load -> retry
 ```
 
 Nhiều client có `defineCommand`/script abstraction tự làm việc này.
@@ -338,21 +347,50 @@ Redis Functions (từ Redis 7) là alternative cho ad-hoc Eval scripts. Function
 
 ### 8.1. Library minh họa
 
-```lua
-#!lua name=inventory_v1
+Chọn từng bước để theo dõi library, kiểm tra input và cập nhật stock. Component chỉ hiển thị source, không load function vào Redis. Ví dụ giả định stock là String integer hợp lệ và quantity là số nguyên dương; production cần validate contract này.
 
-redis.register_function('reserve', function(keys, args)
-  local quantity = tonumber(args[1])
-  local stock = tonumber(redis.call('GET', keys[1]) or '0')
-  if not quantity or quantity <= 0 then
-    return redis.error_reply('INVALID_QUANTITY')
-  end
-  if stock < quantity then
-    return {0, stock}
-  end
-  local remaining = redis.call('DECRBY', keys[1], quantity)
-  return {1, remaining}
-end)
+```code-walkthrough
+title: Reserve stock bằng Redis Function
+language: lua
+snapshots:
+  - id: reserve
+    title: inventory_v1.lua
+    code: |-
+      #!lua name=inventory_v1
+
+      redis.register_function('reserve', function(keys, args)
+        local quantity = tonumber(args[1])
+        local stock = tonumber(redis.call('GET', keys[1]) or '0')
+        if not quantity or quantity <= 0 then
+          return redis.error_reply('INVALID_QUANTITY')
+        end
+        if stock < quantity then
+          return {0, stock}
+        end
+        local remaining = redis.call('DECRBY', keys[1], quantity)
+        return {1, remaining}
+      end)
+steps:
+  - id: library
+    snapshot: reserve
+    title: Đăng ký library và function
+    description: Library có tên inventory_v1; function reserve nhận keys và args được truyền từ FCALL.
+    ranges: [[1, 3]]
+  - id: validate
+    snapshot: reserve
+    title: Đọc và kiểm tra input
+    description: Chuyển quantity sang số, đọc stock và trả lỗi cho quantity thiếu hoặc không dương. Ví dụ giả định quantity nguyên và stock có type/giá trị hợp lệ.
+    ranges: [[4, 8]]
+  - id: insufficient
+    snapshot: reserve
+    title: Từ chối khi thiếu stock
+    description: Trả status 0 và stock hiện tại; chưa có write nào ở nhánh này.
+    ranges: [[9, 11]]
+  - id: decrement
+    snapshot: reserve
+    title: Trừ stock và trả kết quả
+    description: DECRBY chạy trong cùng function, không client command nào chen giữa check và decrement. Status 1 báo đã áp dụng.
+    ranges: [[12, 14]]
 ```
 
 ```bash
@@ -456,12 +494,14 @@ Script đọc Set chứa danh sách key rồi loop `GET` các key đó là anti-
 
 Redis hiện đại dùng **effects replication**: các write command do script tạo được propagate tới replicas/AOF, thay vì replica chạy lại toàn script. Từ Redis 7, verbatim script replication đã bị loại bỏ.
 
-```text
-Primary chạy Lua
-  ├─ GET/check chỉ chạy ở primary
-  ├─ DECRBY effect
-  └─ SET effect
-       → replication/AOF nhận effects được bọc phù hợp
+```d2 title="Replication và AOF nhận effects của script"
+direction: right
+primary: Primary chạy Lua
+check: GET / check chỉ chạy ở primary
+effects: "Effects\nDECRBY và SET"
+propagate: Replication / AOF nhận effects được bọc phù hợp
+primary -> check
+primary -> effects -> propagate
 ```
 
 ### 11.1. Ý nghĩa

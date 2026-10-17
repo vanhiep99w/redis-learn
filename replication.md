@@ -35,15 +35,14 @@ Trong tài liệu Redis hiện đại, mô hình này thường được gọi l
 
 Một topology đơn giản:
 
-```text
-                 write
-Client ─────────────────────▶ Master
-                              │
-                              │ replication stream
-                              ▼
-                           Replica
-                              ▲
-Client ─────── read ──────────┘
+```d2 title="Tách write trên master và read trên replica"
+direction: right
+client: Client
+master: Master
+replica: Replica
+client -> master: Write
+master -> replica: Replication stream
+client -> replica: Read
 ```
 
 Ý tưởng cốt lõi:
@@ -71,23 +70,23 @@ Client ─────── read ──────────┘
 
 Ví dụ thực tế:
 
-```text
-                 ┌──────────────────────┐
-                 │  App write traffic   │
-                 └──────────┬───────────┘
-                            ▼
-                      ┌──────────┐
-                      │ Master   │
-                      │ Redis A  │
-                      └────┬─────┘
-             ┌─────────────┼─────────────┐
-             ▼             ▼             ▼
-       ┌──────────┐  ┌──────────┐  ┌──────────┐
-       │ Replica  │  │ Replica  │  │ Replica  │
-       │ Redis B  │  │ Redis C  │  │ Redis D  │
-       └────┬─────┘  └────┬─────┘  └────┬─────┘
-            ▼             ▼             ▼
-      read traffic   reporting job   backup job
+```d2 title="Replica phục vụ read, reporting và backup"
+direction: down
+app: App write traffic
+master: Master Redis A
+b: Replica Redis B
+c: Replica Redis C
+d: Replica Redis D
+read: Read traffic
+reporting: Reporting job
+backup: Backup job
+app -> master
+master -> b
+master -> c
+master -> d
+b -> read
+c -> reporting
+d -> backup
 ```
 
 ---
@@ -120,16 +119,15 @@ replica-read-only yes
 
 ### Một master có nhiều replica
 
-```text
-          ┌──────────┐
-          │ Master   │
-          └────┬─────┘
-               │
-     ┌─────────┼─────────┐
-     ▼         ▼         ▼
-┌─────────┐ ┌─────────┐ ┌─────────┐
-│Replica 1│ │Replica 2│ │Replica 3│
-└─────────┘ └─────────┘ └─────────┘
+```d2 title="Một master có nhiều replica"
+direction: down
+master: Master
+r1: Replica 1
+r2: Replica 2
+r3: Replica 3
+master -> r1
+master -> r2
+master -> r3
 ```
 
 Master phải gửi replication stream cho từng replica. Nếu số replica quá nhiều hoặc replica/network chậm, master tốn thêm memory cho output buffer và CPU/network để đẩy stream.
@@ -144,20 +142,30 @@ Redis replication có 3 cơ chế chính:
 2. **Partial resynchronization**: khi kết nối bị đứt ngắn, replica reconnect và xin phần stream bị thiếu.
 3. **Full resynchronization**: khi partial sync không thể thực hiện, master gửi lại toàn bộ dataset.
 
-```mermaid
-flowchart TD
-    A[Replica start hoặc mất kết nối] --> B[Kết nối tới master]
-    B --> C[Gửi PSYNC với replication ID + offset đã biết]
-    C --> D{Master có đủ backlog và cùng history?}
-    D -- Có --> E[Partial sync: gửi phần stream bị thiếu]
-    D -- Không --> F[Full sync: tạo/gửi RDB snapshot]
-    E --> G[Streaming command liên tục]
-    F --> H[Replica load RDB]
-    H --> I[Apply command được buffer trong lúc tạo RDB]
-    I --> G
-    G --> J{Kết nối ổn định?}
-    J -- Có --> G
-    J -- Không --> A
+```d2 title="Luồng hoạt động tổng quát"
+direction: down
+A: "Replica start hoặc mất kết nối" { icon: https://icons.d2lang.com/dev/redis.svg }
+B: "Kết nối tới master" { icon: https://icons.d2lang.com/dev/redis.svg }
+C: "Gửi PSYNC với replication ID + offset\nđã biết" { icon: https://icons.d2lang.com/dev/redis.svg }
+D: "Master có đủ backlog và cùng history?" { shape: diamond; icon: https://icons.d2lang.com/dev/redis.svg }
+E: "Partial sync: gửi phần stream bị thiếu"
+F: "Full sync: tạo/gửi RDB snapshot"
+G: "Streaming command liên tục"
+H: "Replica load RDB" { icon: https://icons.d2lang.com/dev/redis.svg }
+I: "Apply command được buffer trong lúc\ntạo RDB"
+J: "Kết nối ổn định?" { shape: diamond }
+A -> B
+B -> C
+C -> D
+D -> E: "Có"
+D -> F: "Không"
+E -> G
+F -> H
+H -> I
+I -> G
+G -> J
+J -> G: "Có"
+J -> A: "Không"
 ```
 
 Điểm cần nhớ:
@@ -181,21 +189,20 @@ flowchart TD
 
 Luồng chuẩn:
 
-```mermaid
-sequenceDiagram
-    participant R as Replica
-    participant M as Master
-    participant C as Client
-
-    R->>M: PSYNC ? -1 hoặc ID/offset cũ
-    M-->>R: FULLRESYNC replid offset
-    M->>M: Fork child để tạo RDB snapshot
-    C->>M: Write commands trong lúc snapshot
-    M->>M: Buffer write commands mới
-    M-->>R: Gửi RDB snapshot
-    R->>R: Xóa dataset cũ, load RDB
-    M-->>R: Gửi commands đã buffer
-    M-->>R: Tiếp tục streaming command mới
+```d2 title="Full sync diễn ra như thế nào?"
+shape: sequence_diagram
+R: "Replica" { icon: https://icons.d2lang.com/dev/redis.svg }
+M: "Master" { icon: https://icons.d2lang.com/dev/redis.svg }
+C: "Client"
+R -> M: "PSYNC ? -1 hoặc ID/offset cũ"
+M -> R: "FULLRESYNC replid offset" { style.stroke-dash: 4 }
+M -> M: "Fork child để tạo RDB snapshot"
+C -> M: "Write commands trong lúc snapshot"
+M -> M: "Buffer write commands mới"
+M -> R: "Gửi RDB snapshot" { style.stroke-dash: 4 }
+R -> R: "Xóa dataset cũ, load RDB"
+M -> R: "Gửi commands đã buffer" { style.stroke-dash: 4 }
+M -> R: "Tiếp tục streaming command mới" { style.stroke-dash: 4 }
 ```
 
 ### Vì sao full sync nặng?
@@ -362,16 +369,15 @@ Redis replication mặc định là **asynchronous replication**.
 
 Luồng write thông thường:
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant M as Master
-    participant R as Replica
-
-    Client->>M: SET order:1 paid
-    M-->>Client: OK
-    M-->>R: SET order:1 paid
-    R-->>M: ACK offset sau đó
+```d2 title="Asynchronous replication và tính nhất quán"
+shape: sequence_diagram
+Client: "Client"
+M: "Master" { icon: https://icons.d2lang.com/dev/redis.svg }
+R: "Replica" { icon: https://icons.d2lang.com/dev/redis.svg }
+Client -> M: "SET order:1 paid"
+M -> Client: "OK" { style.stroke-dash: 4 }
+M -> R: "SET order:1 paid" { style.stroke-dash: 4 }
+R -> M: "ACK offset sau đó" { style.stroke-dash: 4 }
 ```
 
 Master trả `OK` cho client trước khi replica chắc chắn đã apply command. Vì vậy:
@@ -462,15 +468,15 @@ Ví dụ response:
 
 Replica thường được dùng để scale read:
 
-```text
-                 ┌───────────────┐
-                 │ Load Balancer │
-                 │ / Client lib  │
-                 └───────┬───────┘
-                         │ reads
-           ┌─────────────┼─────────────┐
-           ▼             ▼             ▼
-      Replica A     Replica B     Replica C
+```d2 title="Phân phối read tới replica"
+direction: down
+lb: Load balancer / client library
+a: Replica A
+b: Replica B
+c: Replica C
+lb -> a: Reads
+lb -> b: Reads
+lb -> c: Reads
 ```
 
 ### Loại read phù hợp với replica
@@ -488,18 +494,17 @@ Replica thường được dùng để scale read:
 
 Kịch bản lỗi phổ biến:
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant App
-    participant M as Master
-    participant R as Replica
-
-    User->>App: Update profile name
-    App->>M: SET user:1:name "An"
-    M-->>App: OK
-    App->>R: GET user:1:name
-    R-->>App: "old name"
+```d2 title="Read-your-writes problem"
+shape: sequence_diagram
+User: "User"
+App: "App"
+M: "Master" { icon: https://icons.d2lang.com/dev/redis.svg }
+R: "Replica" { icon: https://icons.d2lang.com/dev/redis.svg }
+User -> App: "Update profile name"
+App -> M: "SET user:1:name \"An\""
+M -> App: "OK" { style.stroke-dash: 4 }
+App -> R: "GET user:1:name"
+R -> App: "old name" { style.stroke-dash: 4 }
 ```
 
 Cách xử lý:
@@ -549,9 +554,18 @@ redis-cli -h replica2 REPLICAOF <new-master-ip> 6379
 
 Nếu master cũ chưa thật sự chết mà chỉ bị network partition, việc promote replica có thể tạo hai master cùng nhận write:
 
-```text
-Partition 1: Client A ─▶ Old Master
-Partition 2: Client B ─▶ New Master
+```d2 title="Hai partition có thể ghi vào hai master khác nhau"
+direction: right
+p1: Partition 1 {
+  client: Client A
+  master: Old Master
+  client -> master: Write
+}
+p2: Partition 2 {
+  client: Client B
+  master: New Master
+  client -> master: Write
+}
 ```
 
 Khi network hồi phục, hai timeline dữ liệu khác nhau. Redis basic replication không tự merge conflict.
@@ -657,8 +671,13 @@ replica-ignore-maxmemory yes
 
 Redis cho phép replica replicate từ replica khác:
 
-```text
-Master A ──▶ Replica B ──▶ Replica C ──▶ Replica D
+```d2 title="Cascading replication"
+direction: right
+n0: "Master A"
+n1: "Replica B"
+n2: "Replica C"
+n3: "Replica D"
+n0 -> n1 -> n2 -> n3
 ```
 
 Mô hình này gọi là **cascading replication**.
@@ -1152,11 +1171,15 @@ Nếu một replica được Sentinel dùng làm candidate failover, đừng dù
 
 Một mô hình tốt:
 
-```text
-Master
-├── Replica HA 1      ít read, ưu tiên promote
-├── Replica HA 2      ít read, ưu tiên promote
-└── Replica analytics chạy reporting/backup, priority thấp
+```d2 title="Phân vai replica HA và analytics"
+direction: down
+master: Master
+ha1: Replica HA 1 — ít read, ưu tiên promote
+ha2: Replica HA 2 — ít read, ưu tiên promote
+analytics: Replica analytics — reporting/backup, priority thấp
+master -> ha1
+master -> ha2
+master -> analytics
 ```
 
 Có thể dùng `replica-priority` để ảnh hưởng lựa chọn failover trong Sentinel.

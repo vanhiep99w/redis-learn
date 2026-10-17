@@ -40,8 +40,13 @@ Các section hợp lệ trong README.md:
 
 ## Guidelines
 - Toàn bộ nội dung viết bằng tiếng Việt (giữ tiếng Anh cho tên kỹ thuật, commands, config)
-- Theo write-docs skill: `.agents/skills/write-docs/SKILL.md`
-- Ưu tiên bảng so sánh và diagram (ASCII/Mermaid) hơn prose dài
+- Theo skill: `.agents/skills/fumadocs-technical-writer/SKILL.md` (repo dùng `.md`, `# Heading`, không frontmatter)
+- Ưu tiên bảng so sánh và D2 hơn prose dài. Dùng fence `d2 title="..."` cho architecture, flow, sequence; `mode=steps` cho failover/resharding. Không thêm Mermaid renderer.
+- D2 và các descriptor `terminal-session`, `code-diff`, `code-walkthrough`, `span-waterfall` đã đăng ký qua `@vanhiep99w/docs-kit` trong `source.config.ts` và MDX map; chỉ dùng khi giúp giải thích nội dung. Không cần import JSX trong từng bài.
+- Giữ log, payload, công thức, cây dữ liệu và ví dụ text cần căn vị trí ở dạng text khi phù hợp.
+- Icon Redis dùng URL `https://icons.d2lang.com/dev/redis.svg` trong source. Build rewrite sang `public/icons/d2/redis.svg` rồi nhúng vào SVG. Thêm icon mới: lưu bản local, ghi nguồn và cập nhật mapping trong `scripts/prepare-content.mjs`.
+- Chỉ compile D2/descriptor do tác giả tin cậy quản lý trong repo; SVG được nhúng trực tiếp. Không nhận input công khai/không tin cậy.
+- Sau khi sửa diagram/component: chạy `npm run build`, `npm run typecheck` và `npm run test:browser` (xem README để cài browser).
 - Link related topics giữa các documents: `[text](./other-doc.md)` — script tự rewrite link
 
 ## Table of Contents (Mục lục)

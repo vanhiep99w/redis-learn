@@ -38,29 +38,23 @@ Có hai nhóm công cụ quan trọng:
 
 Một request Redis đi qua nhiều chặng:
 
-```text
-App code
-  │ serialize command
-  ▼
-Client library queue / connection pool
-  │ write socket
-  ▼
-Network / TLS / kernel
-  │
-  ▼
-Redis input buffer
-  │ parse command
-  ▼
-Redis execute command
-  │ access data structure / allocate / free
-  ▼
-Redis output buffer
-  │ write socket
-  ▼
-Network back to client
-  │ parse response
-  ▼
-App receives result
+```d2 title="Đường đi end-to-end của một request Redis"
+direction: down
+app: App code
+client: Client queue / connection pool
+network: Network / TLS / kernel
+input: Redis input buffer
+execute: Redis execute command
+output: Redis output buffer
+back: Network back to client
+result: App receives result
+app -> client: Serialize command
+client -> network: Write socket
+network -> input
+input -> execute: Parse command
+execute -> output: Data structure / allocate / free
+output -> back: Write socket
+back -> result: Parse response
 ```
 
 `SLOWLOG` chỉ nhìn phần:
@@ -78,6 +72,55 @@ Vì vậy cần phân biệt:
 | Network/client | connection pool queue, packet loss | app metrics, tcpdump, client tracing |
 | Response transfer | `SMEMBERS` trả 100MB | app latency, output buffer, network metrics |
 | OS/runtime | swap, CPU steal, THP, noisy neighbor | `vmstat`, `top`, cloud metrics |
+
+Ví dụ trace **minh họa** dưới đây có tổng 200 ms nhưng phần execute chỉ 2 ms. Các số do tác giả đặt để phân biệt phạm vi đo, không phải benchmark hay trace thu từ production. Chọn span để xem thời gian; các chặng dùng chung mốc 0.
+
+```span-waterfall
+title: App chờ 200 ms không có nghĩa Redis execute 200 ms
+unit: ms
+provenance:
+  kind: illustrative
+  description: Số liệu tổng hợp để giải thích SLOWLOG; không kết nối tracing backend.
+spans:
+  - id: call
+    name: Redis call nhìn từ application
+    service: app
+    start: 0
+    duration: 200
+    status: ok
+  - id: pool
+    parent: call
+    name: Chờ client queue / connection pool
+    service: redis-client
+    start: 0
+    duration: 140
+  - id: outbound
+    parent: call
+    name: Gửi request qua network / TLS
+    service: network
+    start: 140
+    duration: 10
+  - id: execute
+    parent: call
+    name: Redis execute command — phạm vi SLOWLOG
+    service: redis
+    start: 150
+    duration: 2
+    status: ok
+    attributes: '{"demo":true,"slowlog.duration_us":2000}'
+  - id: inbound
+    parent: call
+    name: Output buffer và truyền response
+    service: network
+    start: 152
+    duration: 38
+  - id: parse
+    parent: call
+    name: Client parse response
+    service: redis-client
+    start: 190
+    duration: 10
+```
 
 ---
 

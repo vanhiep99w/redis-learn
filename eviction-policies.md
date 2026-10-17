@@ -22,21 +22,20 @@
 
 Eviction là cơ chế Redis **tự xóa key** khi memory chạm `maxmemory`. Nếu Redis được dùng làm cache, eviction là một phần bình thường của hệ thống. Nếu Redis được dùng như database/source-of-truth, eviction có thể là mất dữ liệu nghiêm trọng.
 
-```text
-Write command đến Redis
-        │
-        ▼
-Redis kiểm tra used_memory >= maxmemory?
-        │
-        ├── No ──▶ thực thi command
-        │
-        └── Yes
-             │
-             ▼
-       Áp dụng maxmemory-policy
-             │
-             ├── Evict được key ──▶ thực thi command
-             └── Không evict được ─▶ trả OOM error cho write
+```d2 title="Kiểm tra maxmemory và khả năng eviction"
+direction: down
+write: Write command đến Redis
+check: used_memory >= maxmemory? {shape: diamond}
+policy: Áp dụng maxmemory-policy
+evict: Evict được key? {shape: diamond}
+execute: Thực thi command
+oom: Trả OOM error cho write
+write -> check
+check -> execute: Không
+check -> policy: Có
+policy -> evict
+evict -> execute: Có
+evict -> oom: Không
 ```
 
 Eviction policy trả lời câu hỏi: **khi thiếu RAM, Redis nên xóa key nào trước?**
@@ -268,8 +267,14 @@ Phù hợp khi Redis giữ:
 
 Nhưng `noeviction` yêu cầu app xử lý OOM error:
 
-```text
-Redis OOM -> write fail -> app retry vô hạn -> traffic tăng -> incident nặng hơn
+```d2 title="Retry vô hạn làm OOM trầm trọng hơn"
+direction: right
+n0: "Redis OOM"
+n1: "Write fail"
+n2: "App retry vô hạn"
+n3: "Traffic tăng"
+n4: "Incident nặng hơn"
+n0 -> n1 -> n2 -> n3 -> n4
 ```
 
 Best practice:

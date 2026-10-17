@@ -45,18 +45,19 @@ và vẫn tự failover khi một số node chết?
 
 Một cluster tối thiểu production thường có 3 master và 3 replica:
 
-```text
-                         Redis Cluster
-
-        ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
-        │ Master A     │      │ Master B     │      │ Master C     │
-        │ slots 0-5460 │      │ 5461-10922   │      │10923-16383   │
-        └──────┬───────┘      └──────┬───────┘      └──────┬───────┘
-               │ replication         │ replication         │ replication
-               ▼                     ▼                     ▼
-        ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
-        │ Replica A1   │      │ Replica B1   │      │ Replica C1   │
-        └──────────────┘      └──────────────┘      └──────────────┘
+```d2 title="Redis Cluster: ba shard và ba replica"
+direction: down
+cluster: Redis Cluster {
+  a: "Master A\nslots 0–5460"
+  b: "Master B\nslots 5461–10922"
+  c: "Master C\nslots 10923–16383"
+  a1: Replica A1
+  b1: Replica B1
+  c1: Replica C1
+  a -> a1: Replication
+  b -> b1: Replication
+  c -> c1: Replication
+}
 ```
 
 Redis Cluster chia toàn bộ keyspace thành **16384 hash slots**. Mỗi master chịu trách nhiệm một tập slots. Client cluster-aware biết key thuộc slot nào và gửi command tới node đang sở hữu slot đó.
@@ -79,10 +80,23 @@ Redis Cluster chia toàn bộ keyspace thành **16384 hash slots**. Mỗi master
 
 Ví dụ:
 
-```text
-user:1      ──hash──▶ slot 9842  ──▶ Master B
-session:9   ──hash──▶ slot 231   ──▶ Master A
-product:42  ──hash──▶ slot 15001 ──▶ Master C
+```d2 title="Hash key để tìm node sở hữu slot"
+direction: right
+user: "user:1"
+session: "session:9"
+product: "product:42"
+s9842: Slot 9842
+s231: Slot 231
+s15001: Slot 15001
+b: Master B
+a: Master A
+c: Master C
+user -> s9842: hash
+session -> s231: hash
+product -> s15001: hash
+s9842 -> b
+s231 -> a
+s15001 -> c
 ```
 
 Mỗi master chỉ giữ một phần dữ liệu, nên capacity tăng gần tuyến tính theo số master nếu workload phân bố đều.
@@ -118,21 +132,18 @@ Redis Cluster gồm nhiều Redis node chạy `cluster-enabled yes`. Mỗi node 
 - Thông tin slot ownership.
 - Thông tin các node khác qua gossip.
 
-```text
-                 ┌─────────────────────┐
-                 │ Cluster-aware Client │
-                 └──────────┬──────────┘
-                            │ command to correct node
-                            ▼
-┌────────────────┐   cluster bus   ┌────────────────┐
-│ Node A Master  │◀───────────────▶│ Node B Master  │
-│ slots 0-5460   │                 │ slots 5461...  │
-└───────┬────────┘                 └───────┬────────┘
-        │ replication                      │ replication
-        ▼                                  ▼
-┌────────────────┐                 ┌────────────────┐
-│ Node A Replica │                 │ Node B Replica │
-└────────────────┘                 └────────────────┘
+```d2 title="Client routing và cluster bus"
+direction: down
+client: Cluster-aware client
+a: "Node A Master\nslots 0–5460"
+b: "Node B Master\nslots 5461…"
+ar: Node A Replica
+br: Node B Replica
+client -> a: Command tới đúng node
+client -> b: Command tới đúng node
+a <-> b: Cluster bus
+a -> ar: Replication
+b -> br: Replication
 ```
 
 ### Master node
@@ -332,17 +343,16 @@ GET user:100
 
 ### Luồng routing bình thường
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant A as Node A
-    participant B as Node B
-
-    App->>A: GET user:100
-    A-->>App: MOVED 9842 Node B
-    App->>B: GET user:100
-    B-->>App: value
-    App->>App: Cache slot 9842 -> Node B
+```d2 title="Luồng routing bình thường"
+shape: sequence_diagram
+App: "App"
+A: "Node A"
+B: "Node B"
+App -> A: "GET user:100"
+A -> App: "MOVED 9842 Node B" { style.stroke-dash: 4 }
+App -> B: "GET user:100"
+B -> App: "value" { style.stroke-dash: 4 }
+App -> App: "Cache slot 9842 -> Node B"
 ```
 
 ### Tại sao không dùng proxy nội bộ?
@@ -406,13 +416,19 @@ Replica A2 follows Master A
 
 Nếu Master A fail, một replica của A được promote và nhận các slots `0-5460`.
 
-```text
-Trước:
-A(master slots 0-5460) ─▶ A1(replica)
-
-Sau failover:
-A1(master slots 0-5460)
-A nếu quay lại ─▶ A1(replica)
+```d2 mode=steps title="Replica được promote sau failover"
+direction: right
+a: "A: master\nslots 0–5460"
+a1: "A1: replica"
+a -> a1: Replication
+steps: {
+  failover: {
+    a: "A: nếu quay lại, là replica"
+    a1: "A1: master\nslots 0–5460"
+    (a -> a1)[0]: null
+    a1 -> a: Replication sau rejoin
+  }
+}
 ```
 
 ### Failover điều kiện cơ bản
@@ -464,17 +480,16 @@ Redis Cluster dùng asynchronous replication giống Redis Replication thường
 
 ### Write có thể mất khi master chết
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant M as Master B
-    participant R as Replica B1
-
-    C->>M: SET order:{9}:status paid
-    M-->>C: OK
-    M--xR: chưa kịp replicate
-    M--xM: crash
-    R->>R: promoted to master
+```d2 title="Write có thể mất khi master chết"
+shape: sequence_diagram
+C: "Client"
+M: "Master B" { icon: https://icons.d2lang.com/dev/redis.svg }
+R: "Replica B1" { icon: https://icons.d2lang.com/dev/redis.svg }
+C -> M: "SET order:{9}:status paid"
+M -> C: "OK" { style.stroke-dash: 4 }
+M -> R: "✕ chưa kịp replicate" { style.stroke-dash: 4; style.stroke: "#dc2626" }
+M -> M: "✕ crash" { style.stroke-dash: 4; style.stroke: "#dc2626" }
+R -> R: "promoted to master"
 ```
 
 Write đã được client nhận `OK` nhưng replica chưa nhận, nên mất sau failover.
@@ -580,16 +595,26 @@ Mục tiêu:
 
 Giả sử chuyển slot 9842 từ Node A sang Node D.
 
-```text
-Before:
-slot 9842 → Node A
-
-During:
-Node A: slot 9842 migrating to D
-Node D: slot 9842 importing from A
-
-After:
-slot 9842 → Node D
+```d2 mode=steps title="Chuyển slot 9842 từ A sang D"
+direction: right
+slot: Slot 9842
+a: Node A
+d: Node D
+slot -> a: Owner trước reshard
+steps: {
+  migrating: {
+    a: "Node A\nMIGRATING slot 9842 → D"
+    d: "Node D\nIMPORTING slot 9842 từ A"
+    a -> d: Migrate keys
+  }
+  completed: {
+    (slot -> a)[0]: null
+    (a -> d)[0]: null
+    a: Node A
+    d: Node D
+    slot -> d: Owner sau reshard
+  }
+}
 ```
 
 Trong quá trình migrate:

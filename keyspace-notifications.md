@@ -34,17 +34,16 @@ SCAN toàn keyspace → kiểm tra TTL/value → lặp lại
 
 Keyspace Notifications cho Redis publish signal khi dataset thay đổi:
 
-```mermaid
-sequenceDiagram
-    participant A as Application A
-    participant R as Redis
-    participant S as Subscriber
-
-    S->>R: PSUBSCRIBE __keyevent@0__:expired
-    A->>R: SET session:42 value EX 60
-    R-->>A: OK
-    Note over R: Sau khi key thực sự bị xóa do expire
-    R-->>S: channel=expired, message=session:42
+```d2 title="1. Vấn đề: biết key nào vừa thay đổi mà không polling"
+shape: sequence_diagram
+A: "Application A"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+S: "Subscriber"
+S -> R: "PSUBSCRIBE __keyevent@0__:expired"
+A -> R: "SET session:42 value EX 60"
+R -> A: "OK" { style.stroke-dash: 4 }
+R."Sau khi key thực sự bị xóa do expire"
+R -> S: "channel=expired, message=session:42" { style.stroke-dash: 4 }
 ```
 
 Các signal hữu ích cho observability, cache invalidation best-effort và automation có thể tự reconcile. Nhưng cơ chế dùng Redis Pub/Sub, nên subscriber offline sẽ mất event và không có replay.
@@ -376,14 +375,21 @@ Notification là “key đã thay đổi”, không phải event sourcing delta.
 
 Mỗi Cluster node chỉ phát keyspace events cho subset keyspace của chính nó. Events không broadcast toàn cluster như global Pub/Sub. Muốn coverage toàn cluster, subscriber phải connect/subscribe **mọi relevant primary node**.
 
-```mermaid
-graph TD
-    S[Subscriber manager] --> P1[Primary shard 1]
-    S --> P2[Primary shard 2]
-    S --> P3[Primary shard 3]
-    P1 --> E1[Events slots A]
-    P2 --> E2[Events slots B]
-    P3 --> E3[Events slots C]
+```d2 title="9.1. Cluster: node-specific"
+direction: down
+S: "Subscriber manager"
+P1: "Primary shard 1" { icon: https://icons.d2lang.com/dev/redis.svg }
+P2: "Primary shard 2" { icon: https://icons.d2lang.com/dev/redis.svg }
+P3: "Primary shard 3" { icon: https://icons.d2lang.com/dev/redis.svg }
+E1: "Events slots A"
+E2: "Events slots B"
+E3: "Events slots C"
+S -> P1
+S -> P2
+S -> P3
+P1 -> E1
+P2 -> E2
+P3 -> E3
 ```
 
 Topology thay đổi:
@@ -424,15 +430,14 @@ Kiểm tra:
 
 ### 10.1. Local cache invalidation best-effort
 
-```mermaid
-sequenceDiagram
-    participant W as Writer
-    participant R as Redis
-    participant L as Local cache subscriber
-
-    W->>R: SET product:42 v18
-    R-->>L: keyspace product:42, event set
-    L->>L: Evict local product:42
+```d2 title="10.1. Local cache invalidation best-effort"
+shape: sequence_diagram
+W: "Writer"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+L: "Local cache subscriber"
+W -> R: "SET product:42 v18"
+R -> L: "keyspace product:42, event set" { style.stroke-dash: 4 }
+L -> L: "Evict local product:42"
 ```
 
 Safety net:

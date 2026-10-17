@@ -44,24 +44,19 @@ Các việc nặng hoặc I/O chậm được đẩy ra background thread/proces
 - Vì không có nhiều thread cùng sửa keyspace, Redis tránh lock phức tạp.
 - Persistence/replication được tích hợp vào command path nhưng tối ưu để ít block nhất có thể.
 
-```text
-                   ┌───────────────────────────────┐
-Client sockets ───▶│ Event loop / main thread      │
-                   │                               │
-                   │ read → parse → execute → reply│
-                   └──────────────┬────────────────┘
-                                  │
-                                  ▼
-                   ┌───────────────────────────────┐
-                   │ Keyspace in memory            │
-                   │ dict: key → redisObject       │
-                   │ expires: key → timestamp      │
-                   └──────────────┬────────────────┘
-                                  │
-                    ┌─────────────┼─────────────┐
-                    ▼             ▼             ▼
-                AOF buffer   Replication    Background jobs
-                             backlog        fsync/lazy free/fork
+```d2 title="Event loop, keyspace và background work"
+direction: down
+sockets: Client sockets
+main: "Event loop / main thread\nread → parse → execute → reply"
+keys: "Keyspace in memory\ndict: key → redisObject\nexpires: key → timestamp"
+aof: AOF buffer
+repl: Replication backlog
+bg: "Background jobs\nfsync / lazy free / fork"
+sockets -> main
+main -> keys
+keys -> aof
+keys -> repl
+keys -> bg
 ```
 
 > [!IMPORTANT]
@@ -90,8 +85,14 @@ Một Redis server gồm nhiều phần phối hợp:
 
 Luồng request rất ngắn nếu command đơn giản:
 
-```text
-socket readable → read bytes → parse command → execute on dict → write response
+```d2 title="Đường đi của command"
+direction: right
+n0: "Socket readable"
+n1: "Read bytes"
+n2: "Parse command"
+n3: "Execute on dict"
+n4: "Write response"
+n0 -> n1 -> n2 -> n3 -> n4
 ```
 
 Redis tối ưu mạnh cho trường hợp phổ biến: command nhỏ, truy cập key trực tiếp, thao tác trong memory, response nhỏ.
@@ -102,22 +103,14 @@ Redis tối ưu mạnh cho trường hợp phổ biến: command nhỏ, truy c�
 
 Redis là một process server. Bên trong có:
 
-```text
-Redis process
-├── Main thread
-│   ├── Event loop
-│   ├── Command execution
-│   ├── Keyspace mutation
-│   └── Reply generation
-├── I/O threads tùy config
-│   └── Socket read/write hỗ trợ main thread
-├── Background I/O threads
-│   ├── fsync AOF everysec
-│   ├── lazy free memory
-│   └── close file descriptors
-└── Child processes theo thời điểm
-    ├── BGSAVE
-    └── AOF rewrite
+```d2 title="Threads và child processes của Redis"
+direction: down
+process: Redis process {
+  main: "Main thread\nEvent loop / command execution\nKeyspace mutation / reply generation"
+  io: "I/O threads (tùy config)\nSocket read/write hỗ trợ main thread"
+  bg: "Background I/O threads\nAOF fsync everysec / lazy free\nClose file descriptors"
+  child: "Child processes (theo thời điểm)\nBGSAVE / AOF rewrite"
+}
 ```
 
 ### Main thread
@@ -156,16 +149,25 @@ Redis dùng event loop kết hợp I/O multiplexing như `epoll` trên Linux ho�
 
 Thay vì tạo một thread cho mỗi connection, Redis có thể quản lý hàng nghìn sockets bằng một event loop.
 
-```mermaid
-flowchart LR
-    C1[Client 1] --> K[Kernel socket buffer]
-    C2[Client 2] --> K
-    C3[Client N] --> K
-    K --> E[epoll/kqueue]
-    E --> L[Redis event loop]
-    L --> P[Read + parse]
-    P --> X[Execute command]
-    X --> R[Write reply]
+```d2 title="Event loop và I/O multiplexing"
+direction: right
+C1: "Client 1"
+K: "Kernel socket buffer"
+C2: "Client 2"
+C3: "Client N"
+E: "epoll/kqueue"
+L: "Redis event loop" { icon: https://icons.d2lang.com/dev/redis.svg }
+P: "Read + parse"
+X: "Execute command"
+R: "Write reply"
+C1 -> K
+C2 -> K
+C3 -> K
+K -> E
+E -> L
+L -> P
+P -> X
+X -> R
 ```
 
 ### File event
@@ -252,28 +254,27 @@ SET user:1:name "Hiep" EX 300
 
 Luồng chi tiết:
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant K as Kernel
-    participant E as Event Loop
-    participant P as Parser
-    participant X as Executor
-    participant D as Keyspace
-    participant A as AOF/Replication
-
-    C->>K: RESP bytes
-    K->>E: socket readable
-    E->>E: read vào query buffer
-    E->>P: parse command + args
-    P-->>E: [SET, user:1:name, Hiep, EX, 300]
-    E->>X: lookup setCommand
-    X->>X: ACL + arity + flags + memory checks
-    X->>D: write key + expire timestamp
-    X->>A: propagate command
-    X-->>E: reply OK
-    E->>K: flush output buffer
-    K-->>C: +OK
+```d2 title="Vòng đời một command"
+shape: sequence_diagram
+C: "Client"
+K: "Kernel"
+E: "Event Loop"
+P: "Parser"
+X: "Executor"
+D: "Keyspace"
+A: "AOF/Replication" { icon: https://icons.d2lang.com/dev/redis.svg }
+C -> K: "RESP bytes"
+K -> E: "socket readable"
+E -> E: "read vào query buffer"
+E -> P: "parse command + args"
+P -> E: "[SET, user:1:name, Hiep, EX, 300]" { style.stroke-dash: 4 }
+E -> X: "lookup setCommand"
+X -> X: "ACL + arity + flags + memory checks"
+X -> D: "write key + expire timestamp"
+X -> A: "propagate command"
+X -> E: "reply OK" { style.stroke-dash: 4 }
+E -> K: "flush output buffer"
+K -> C: "+OK" { style.stroke-dash: 4 }
 ```
 
 ### Bước 1: Read vào query buffer
@@ -425,10 +426,11 @@ Hash table cần resize khi số key tăng/giảm. Nếu rehash toàn bộ hàng
 
 Redis dùng incremental rehashing:
 
-```text
-Old table ht[0] ──┐
-                  ├─ Redis di chuyển dần bucket sang ht[1]
-New table ht[1] ──┘
+```d2 title="Incremental rehash chuyển từng bucket"
+direction: right
+old: "Old table ht[0]"
+new: "New table ht[1]"
+old -> new: Redis di chuyển dần bucket
 ```
 
 Mỗi operation trên dict giúp chuyển một phần nhỏ. Nhờ vậy latency ổn định hơn.
@@ -441,13 +443,19 @@ Redis value được bọc trong `redisObject`.
 
 Concept đơn giản:
 
-```text
-key → redisObject
-        ├── type: API-level data type
-        ├── encoding: representation bên trong
-        ├── lru/lfu metadata
-        ├── refcount
-        └── ptr → dữ liệu thật
+```d2 title="redisObject mô tả dữ liệu và encoding"
+direction: right
+key: key
+object: redisObject {
+  type: "type: API-level data type"
+  encoding: "encoding: representation bên trong"
+  meta: lru/lfu metadata
+  refs: refcount
+  ptr: ptr
+}
+data: Dữ liệu thật
+key -> object
+object.ptr -> data
 ```
 
 ### Type là gì?
@@ -566,11 +574,15 @@ TTL trong Redis không phải một thread riêng xóa đúng từng key ngay t�
 
 Khi client truy cập key, Redis check TTL:
 
-```text
-GET session:abc
-→ check expires[session:abc]
-→ nếu now > expire_time: xóa key và trả nil
-→ nếu chưa hết hạn: trả value
+```d2 title="Lazy expiration khi đọc key"
+direction: down
+get: "GET session:abc"
+check: "now > expires[session:abc]?" {shape: diamond}
+expired: Xóa key và trả nil
+value: Trả value
+get -> check
+check -> expired: Có
+check -> value: Không
 ```
 
 Ưu điểm: không tốn công xóa key không ai động tới.
@@ -657,19 +669,18 @@ Replica nhận stream và apply command
 
 Replication cũng gắn vào command lifecycle.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant M as Master
-    participant R as Replica
-    participant A as AOF
-
-    C->>M: SET k v
-    M->>M: execute command
-    M->>A: append to AOF buffer
-    M-->>R: propagate command
-    M-->>C: OK
-    R->>R: apply command later
+```d2 title="Replication path: command propagation"
+shape: sequence_diagram
+C: "Client"
+M: "Master" { icon: https://icons.d2lang.com/dev/redis.svg }
+R: "Replica" { icon: https://icons.d2lang.com/dev/redis.svg }
+A: "AOF"
+C -> M: "SET k v"
+M -> M: "execute command"
+M -> A: "append to AOF buffer"
+M -> R: "propagate command" { style.stroke-dash: 4 }
+M -> C: "OK" { style.stroke-dash: 4 }
+R -> R: "apply command later"
 ```
 
 Redis replication mặc định async: master không chờ replica apply xong mới trả OK. Điều này giữ latency thấp nhưng có cửa sổ mất write khi failover.
@@ -764,11 +775,16 @@ Redis có các blocking commands như:
 
 “Blocking” ở đây không có nghĩa là block toàn Redis server. Redis đưa client vào trạng thái chờ và event loop tiếp tục xử lý client khác.
 
-```text
-Client A: BLPOP queue 0
-→ Redis mark client A blocked
-→ Event loop xử lý client B/C bình thường
-→ Khi queue có item, Redis wake client A
+```d2 title="Blocking command không block toàn event loop"
+shape: sequence_diagram
+a: Client A
+redis: Redis
+others: Client B/C
+a -> redis: BLPOP queue 0
+redis."Mark client A blocked"
+others -> redis: Command khác vẫn được xử lý
+redis."Queue có item"
+redis -> a: Wake client A và trả item
 ```
 
 Tuy nhiên cần cẩn thận:

@@ -42,13 +42,19 @@ ZRANGE lb:season:27 0 99 REV WITHSCORES
 
 `ZINCRBY` và rank là O(log N); top N là O(log N + M) với M kết quả. Internals dict + skiplist được giải thích tại [Sorted Sets](./sorted-sets.md).
 
-```mermaid
-graph LR
-    E[Score events] --> S[Score Service]
-    S -->|validate + ZINCRBY| R[(Redis ZSet)]
-    S -->|durable event| Q[Stream/Broker]
-    API[Leaderboard API] -->|ZRANGE/ZREVRANK| R
-    Q --> D[(Database / Data lake)]
+```d2 title="1. Từ điểm số đến thứ hạng real-time"
+direction: right
+E: "Score events"
+S: "Score Service"
+R: "Redis ZSet" { shape: cylinder; icon: https://icons.d2lang.com/dev/redis.svg }
+Q: "Stream/Broker"
+API: "Leaderboard API"
+D: "Database / Data lake" { shape: cylinder }
+E -> S
+S -> R: "validate + ZINCRBY"
+S -> Q: "durable event"
+API -> R: "ZRANGE/ZREVRANK"
+Q -> D
 ```
 
 > [!IMPORTANT]
@@ -83,19 +89,18 @@ Xấu: member = {"id":88420,"name":"Alice","avatar":"..."}
 
 Profile thay đổi sẽ biến thành member mới và tạo duplicate logic; member dài cũng tốn memory. Lấy top IDs rồi batch `MGET`/pipeline Hash/profile cache.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as API
-    participant R as Redis Leaderboard
-    participant P as Profile Cache/DB
-
-    C->>A: GET /leaderboards/s27?top=100
-    A->>R: ZRANGE key 0 99 REV WITHSCORES
-    R-->>A: 100 player IDs + scores
-    A->>P: Batch get profiles
-    P-->>A: names, avatars
-    A-->>C: ranked response
+```d2 title="2.1. Chỉ lưu ID trong ZSet"
+shape: sequence_diagram
+C: "Client"
+A: "API"
+R: "Redis Leaderboard" { icon: https://icons.d2lang.com/dev/redis.svg }
+P: "Profile Cache/DB"
+C -> A: "GET /leaderboards/s27?top=100"
+A -> R: "ZRANGE key 0 99 REV WITHSCORES"
+R -> A: "100 player IDs + scores" { style.stroke-dash: 4 }
+A -> P: "Batch get profiles"
+P -> A: "names, avatars" { style.stroke-dash: 4 }
+A -> C: "ranked response" { style.stroke-dash: 4 }
 ```
 
 ### 2.2. Key dimensions
@@ -337,21 +342,20 @@ Writer xác định season từ config/event, không chỉ pointer cache có th�
 
 ### 7.2. Close season flow
 
-```mermaid
-sequenceDiagram
-    participant O as Season Orchestrator
-    participant W as Score Writers
-    participant R as Redis
-    participant D as Durable DB/Object Store
-    participant P as Prize Worker
-
-    O->>W: Stop/route events sang season 28
-    O->>R: Mark season 27 closed
-    O->>R: Read snapshot theo batches
-    O->>D: Persist final standings + checksum
-    D-->>O: Commit snapshot
-    O->>P: Prize jobs với idempotency key
-    P->>D: Record award exactly once
+```d2 title="7.2. Close season flow"
+shape: sequence_diagram
+O: "Season Orchestrator"
+W: "Score Writers"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+D: "Durable DB/Object Store"
+P: "Prize Worker"
+O -> W: "Stop/route events sang season 28"
+O -> R: "Mark season 27 closed"
+O -> R: "Read snapshot theo batches"
+O -> D: "Persist final standings + checksum"
+D -> O: "Commit snapshot" { style.stroke-dash: 4 }
+O -> P: "Prize jobs với idempotency key"
+P -> D: "Record award exactly once"
 ```
 
 Không phát thưởng trực tiếp khi scan live ZSet mà vẫn có writer. Freeze bằng state machine/cutoff, drain event backlog rồi snapshot. Prize worker phải idempotent; “đã trao prize” nằm trong durable database với unique constraint.
@@ -624,18 +628,27 @@ ZSet lớn dùng dict + skiplist, overhead mỗi member đáng kể. Đo bằng 
 
 ### 15.2. Thiết kế
 
-```mermaid
-graph TD
-    M[Match Service] -->|durable ScoreAwarded event| K[Broker]
-    K --> C[Projection Consumers]
-    C -->|version check + ZADD| G[(Global ZSet)]
-    C -->|ZADD| R[(Country ZSets)]
-    C --> D[(Score ledger/read model DB)]
-    API --> G
-    API --> R
-    O[Season closer] --> G
-    O --> S[(Immutable snapshot)]
-    S --> P[Idempotent prize worker]
+```d2 title="15.2. Thiết kế"
+direction: down
+M: "Match Service"
+K: "Broker"
+C: "Projection Consumers"
+G: "Global ZSet" { shape: cylinder }
+R: "Country ZSets" { shape: cylinder }
+D: "Score ledger/read model DB" { shape: cylinder }
+O: "Season closer"
+S: "Immutable snapshot" { shape: cylinder }
+P: "Idempotent prize worker"
+M -> K: "durable ScoreAwarded event"
+K -> C
+C -> G: "version check + ZADD"
+C -> R: "ZADD"
+C -> D
+API -> G
+API -> R
+O -> G
+O -> S
+S -> P
 ```
 
 Quyết định:

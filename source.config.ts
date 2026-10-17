@@ -1,26 +1,11 @@
 import { rehypeCodeDefaultOptions } from 'fumadocs-core/mdx-plugins';
 import { defineDocs, defineConfig } from 'fumadocs-mdx/config';
 import { visit } from 'unist-util-visit';
-
-function remarkMermaid() {
-  return (tree: import('mdast').Root) => {
-    visit(tree, 'code', (node, index, parent) => {
-      if (node.lang !== 'mermaid' || index === undefined || !parent) return;
-      (parent.children as unknown[])[index] = {
-        type: 'mdxJsxFlowElement',
-        name: 'MermaidDiagram',
-        attributes: [
-          {
-            type: 'mdxJsxAttribute',
-            name: 'chart',
-            value: node.value,
-          },
-        ],
-        children: [],
-      };
-    });
-  };
-}
+import { remarkD2 } from '@vanhiep99w/docs-kit/d2';
+import { remarkTerminalSession } from '@vanhiep99w/docs-kit/terminal-session';
+import { remarkCodeDiff } from '@vanhiep99w/docs-kit/code-diff';
+import { remarkCodeWalkthrough } from '@vanhiep99w/docs-kit/code-walkthrough';
+import { remarkSpanWaterfall } from '@vanhiep99w/docs-kit/span-waterfall';
 
 const ADMONITION_TYPES: Record<string, { type: string; title: string }> = {
   NOTE: { type: 'info', title: 'Note' },
@@ -67,6 +52,22 @@ export default defineConfig({
       ...rehypeCodeDefaultOptions,
       fallbackLanguage: 'text',
     },
-    remarkPlugins: [remarkMermaid, remarkGithubAdmonition],
+    // Compile diagrams/descriptors before Shiki processes ordinary code fences.
+    // WASM and syntax highlighters stay in the build process, never the browser.
+    remarkPlugins: [
+      [remarkD2, {
+        cacheDir: '.next/cache/docs-kit/d2',
+        assetsRoot: 'public/icons/d2',
+        concurrency: 1,
+        interactive: true,
+        sketch: false,
+        defaultCaption: 'Sơ đồ',
+      }],
+      remarkTerminalSession,
+      remarkCodeDiff,
+      remarkCodeWalkthrough,
+      remarkSpanWaterfall,
+      remarkGithubAdmonition,
+    ],
   },
 });

@@ -37,17 +37,16 @@ SET balance:B <B + 100>
 
 Hai request chạy đồng thời có thể cùng đọc balance cũ rồi ghi đè lẫn nhau. Một client khác cũng có thể quan sát trạng thái giữa hai lệnh `SET`: A đã bị trừ nhưng B chưa được cộng.
 
-```mermaid
-sequenceDiagram
-    participant C1 as Client A
-    participant R as Redis
-    participant C2 as Client B
-
-    C1->>R: GET balance = 1000
-    C2->>R: GET balance = 1000
-    C1->>R: SET balance 900
-    C2->>R: SET balance 950
-    Note over R: Update của Client A bị ghi đè
+```d2 title="1. Vấn đề: nhiều command riêng lẻ tạo race condition"
+shape: sequence_diagram
+C1: "Client A"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+C2: "Client B"
+C1 -> R: "GET balance = 1000"
+C2 -> R: "GET balance = 1000"
+C1 -> R: "SET balance 900"
+C2 -> R: "SET balance 950"
+R."Update của Client A bị ghi đè"
 ```
 
 Redis transaction gom một nhóm command để chúng được thực thi tuần tự, không có command của client khác xen vào giữa. Tuy nhiên transaction Redis **không giống transaction SQL**: không có isolation level tùy chọn, không có rollback khi một command runtime lỗi, không bao phủ database khác và không tự kiểm tra business invariant.
@@ -64,11 +63,17 @@ Redis cung cấp hai guarantee cốt lõi:
 1. Các command đã queue được thực thi **tuần tự và liền nhau** khi `EXEC` chạy; request của client khác không xen vào giữa.
 2. Nếu connection mất **trước khi Redis nhận `EXEC`**, không command đã queue nào chạy. Nếu Redis đã nhận và thực thi `EXEC`, các command có thể đã chạy dù client không nhận được response.
 
-```text
-MULTI → queue commands → EXEC
-                         │
-                         ├─ Redis chưa nhận EXEC, connection chết → không chạy
-                         └─ Redis nhận EXEC, response thất lạc → kết quả không rõ với client
+```d2 title="EXEC và sự không chắc chắn khi mất connection"
+direction: down
+multi: MULTI
+queue: Queue commands
+exec: EXEC
+received: Redis đã nhận EXEC? {shape: diamond}
+no: Connection chết trước EXEC → không chạy
+yes: Response thất lạc → client không rõ kết quả
+multi -> queue -> exec -> received
+received -> no: Chưa
+received -> yes: Đã nhận nhưng mất reply
 ```
 
 ### 2.1. Những gì không được đảm bảo
@@ -92,19 +97,40 @@ Atomicity mô tả visibility/execution trong Redis. Durability phụ thuộc AO
 
 ### 3.1. Flow cơ bản
 
-```bash
-MULTI
-# OK
+Transcript minh họa trên một connection `redis-cli`, giả sử `account:A` và `account:B` chưa tồn tại. Chỉ thử trên Redis demo; các command này ghi dữ liệu.
 
-INCR account:A
-# QUEUED
-
-INCR account:B
-# QUEUED
-
-EXEC
-# 1) (integer) 1
-# 2) (integer) 1
+```terminal-session
+title: Queue trước, execute sau
+context:
+  kind: local
+  label: redis-cli / Redis demo
+steps:
+  - id: multi
+    command: MULTI
+    prompt: '127.0.0.1:6379>'
+    outputs:
+      - stream: stdout
+        text: OK
+  - id: increment-a
+    command: INCR account:A
+    prompt: '127.0.0.1:6379(TX)>'
+    outputs:
+      - stream: stdout
+        text: QUEUED
+  - id: increment-b
+    command: INCR account:B
+    prompt: '127.0.0.1:6379(TX)>'
+    outputs:
+      - stream: stdout
+        text: QUEUED
+  - id: exec
+    command: EXEC
+    prompt: '127.0.0.1:6379(TX)>'
+    outputs:
+      - stream: stdout
+        text: |-
+          1) (integer) 1
+          2) (integer) 1
 ```
 
 `EXEC` trả array response theo đúng thứ tự command đã queue. Client library thường map thành array result/error.
@@ -131,11 +157,15 @@ Sau `MULTI`, **connection cụ thể đó** ở transaction mode. Vì vậy:
 - Luôn `DISCARD`/close connection khi code path lỗi trước `EXEC`.
 - Connection bị close sẽ bỏ queued commands và trạng thái `WATCH`.
 
-```text
-Sai với pool
-request → connection A: MULTI
-request → connection B: SET ...   ← chạy ngay, không được queue
-request → connection C: EXEC      ← ERR EXEC without MULTI
+```d2 title="Sai: transaction bị tách qua nhiều pooled connection"
+direction: right
+request: Request
+a: Connection A — MULTI
+b: Connection B — SET chạy ngay, không queue
+c: Connection C — EXEC without MULTI
+request -> a
+request -> b
+request -> c
 ```
 
 Hầu hết client cung cấp transaction object hoặc callback giữ dedicated connection. Dùng API đó thay vì tự ghép command trên generic pool.
@@ -146,21 +176,20 @@ Hầu hết client cung cấp transaction object hoặc callback giữ dedicated
 
 Trong giai đoạn queue, Redis kiểm tra command có hợp lệ về syntax/arity và lưu command + arguments. Redis chưa thực thi data operation.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant R as Redis
-
-    C->>R: MULTI
-    R-->>C: OK
-    C->>R: SET a 1
-    R-->>C: QUEUED
-    C->>R: INCR b
-    R-->>C: QUEUED
-    C->>R: EXEC
-    R->>R: Execute SET a 1
-    R->>R: Execute INCR b
-    R-->>C: [OK, 1]
+```d2 title="4. Bên trong EXEC: queue trước, thực thi tuần tự sau"
+shape: sequence_diagram
+C: "Client"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+C -> R: "MULTI"
+R -> C: "OK" { style.stroke-dash: 4 }
+C -> R: "SET a 1"
+R -> C: "QUEUED" { style.stroke-dash: 4 }
+C -> R: "INCR b"
+R -> C: "QUEUED" { style.stroke-dash: 4 }
+C -> R: "EXEC"
+R -> R: "Execute SET a 1"
+R -> R: "Execute INCR b"
+R -> C: "[OK, 1]" { style.stroke-dash: 4 }
 ```
 
 Trong thời gian các command của `EXEC` được chạy, event loop không phục vụ command từ client khác. Điều này tạo atomic visibility nhưng cũng nghĩa một transaction rất lớn gây latency spike cho toàn shard.
@@ -247,21 +276,20 @@ Redis ưu tiên model data structure đơn giản và performance. Rollback cầ
 
 ### 6.1. Flow
 
-```mermaid
-sequenceDiagram
-    participant A as Client A
-    participant R as Redis
-    participant B as Client B
-
-    A->>R: WATCH balance
-    A->>R: GET balance
-    R-->>A: 100
-    B->>R: SET balance 80
-    A->>R: MULTI
-    A->>R: SET balance 90
-    A->>R: EXEC
-    R-->>A: null vì balance đã thay đổi
-    A->>A: Backoff rồi retry từ đầu
+```d2 title="6.1. Flow"
+shape: sequence_diagram
+A: "Client A"
+R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
+B: "Client B"
+A -> R: "WATCH balance"
+A -> R: "GET balance"
+R -> A: "100" { style.stroke-dash: 4 }
+B -> R: "SET balance 80"
+A -> R: "MULTI"
+A -> R: "SET balance 90"
+A -> R: "EXEC"
+R -> A: "null vì balance đã thay đổi" { style.stroke-dash: 4 }
+A -> A: "Backoff rồi retry từ đầu"
 ```
 
 CLI:

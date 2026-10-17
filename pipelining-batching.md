@@ -22,18 +22,22 @@ Redis xử lý command rất nhanh, thường tính bằng microseconds cho comm
 
 Pipelining cho phép client gửi nhiều command liên tiếp mà không cần chờ response từng command. Redis vẫn xử lý command theo thứ tự, nhưng client chỉ phải chịu ít round trip hơn.
 
-```text
-Không pipeline:
-Client ── SET a ─────────▶ Redis
-Client ◀────────── OK ─── Redis
-Client ── SET b ─────────▶ Redis
-Client ◀────────── OK ─── Redis
-Client ── SET c ─────────▶ Redis
-Client ◀────────── OK ─── Redis
-
-Pipeline:
-Client ── SET a; SET b; SET c ─▶ Redis
-Client ◀── OK; OK; OK ───────── Redis
+```d2 title="Không pipeline và có pipeline"
+shape: sequence_diagram
+client: Client
+redis: Redis
+plain: Không pipeline {
+  client -> redis: SET a
+  redis -> client: OK
+  client -> redis: SET b
+  redis -> client: OK
+  client -> redis: SET c
+  redis -> client: OK
+}
+batch: Pipeline {
+  client -> redis: SET a; SET b; SET c
+  redis -> client: OK; OK; OK
+}
 ```
 
 > [!IMPORTANT]
@@ -120,11 +124,13 @@ Thực hành:
 
 Pipeline không làm Redis xử lý song song command trên nhiều core. Nó chỉ giúp Redis ít idle chờ network hơn.
 
-```text
-Client gửi nhiều command sẵn trong socket
-Redis event loop đọc một lần nhiều command
-Redis execute command 1 → command 2 → command 3
-Redis ghi nhiều response ra socket
+```d2 title="Pipeline tận dụng socket và event loop"
+direction: right
+n0: "Client gửi nhiều command sẵn trong socket"
+n1: "Event loop đọc nhiều command"
+n2: "Execute command 1 → 2 → 3"
+n3: "Ghi nhiều response ra socket"
+n0 -> n1 -> n2 -> n3
 ```
 
 ---
@@ -287,15 +293,18 @@ Redis Cluster phân key vào 16.384 hash slots. Multi-key command và pipeline c
 
 Client tốt sẽ group command theo node:
 
-```text
-Pipeline logical:
-  GET user:1      slot A -> node 1
-  GET product:9   slot B -> node 2
-  GET order:7     slot C -> node 1
-
-Client tách thành:
-  node 1 pipeline: GET user:1, GET order:7
-  node 2 pipeline: GET product:9
+```d2 title="Client tách logical pipeline theo node"
+direction: right
+logical: Pipeline logical {
+  user: "GET user:1 — slot A"
+  product: "GET product:9 — slot B"
+  order: "GET order:7 — slot C"
+}
+n1: "Node 1 pipeline\nGET user:1; GET order:7"
+n2: "Node 2 pipeline\nGET product:9"
+logical.user -> n1
+logical.order -> n1
+logical.product -> n2
 ```
 
 ### Hash tags để cùng slot
