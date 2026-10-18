@@ -35,6 +35,12 @@
   line-height: 1.4;
 }
 
+/* Long command names must shrink beside the heading's copy-anchor button. */
+.prose :is(h2, h3, h4) > a {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .prose pre {
   font-size: 0.875rem;
 }

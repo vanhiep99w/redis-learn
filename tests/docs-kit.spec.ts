@@ -42,14 +42,17 @@ test('D2: zoom, SVG download, expand và chuyển theme', async ({ page }) => {
   expect(labels).toContain('Redis Server');
   expect(labels).not.toContain('\\n');
   expect(labels).not.toContain('"Redis Server');
-  await diagram.getByRole('button', { name: /Explore diagram/ }).click();
+  await expect(diagram.locator('.d2-viewer')).toBeVisible();
   await expect(diagram.getByRole('button', { name: 'Fit', exact: true })).toBeVisible();
+  const before = await diagram.locator('.d2-zoom-content').getAttribute('style');
   await diagram.getByRole('button', { name: 'Zoom in', exact: true }).click();
-  await expect(diagram.getByRole('button', { name: 'Reset zoom' })).toHaveText('125%');
+  await expect(diagram.locator('.d2-zoom-content')).not.toHaveAttribute('style', before!);
   const download = page.waitForEvent('download');
-  await diagram.getByRole('button', { name: 'SVG ↓', exact: true }).click();
+  await diagram.locator('.d2-source-menu > summary').click();
+  await diagram.getByRole('button', { name: 'Download SVG', exact: true }).click();
+  await diagram.locator('.d2-source-menu > summary').click();
   expect((await download).suggestedFilename()).toMatch(/\.svg$/);
-  await diagram.getByRole('button', { name: /Expand/ }).click();
+  await diagram.getByRole('button', { name: 'Fullscreen', exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -80,7 +83,7 @@ test('RDB: cấu trúc dump.rdb là SVG và các trường theo thứ tự file'
 test('D2 steps: resharding chuyển qua từng trạng thái', async ({ page }) => {
   await page.goto('/replication-ha/cluster/');
   const diagram = page.locator('.d2-interactive').filter({ hasText: 'Chuyển slot 9842 từ A sang D' });
-  await diagram.getByRole('button', { name: /Explore diagram/ }).click();
+  await expect(diagram.locator('.d2-viewer')).toBeVisible();
   await expect(diagram.locator('.d2-step-count')).toHaveText('1 / 3');
   await diagram.getByRole('button', { name: /Next/ }).click();
   await expect(diagram.locator('.d2-step-count')).toHaveText('2 / 3');
@@ -125,7 +128,8 @@ test('mobile: diagram cuộn trong khung, không làm tràn trang', async ({ pag
   for (const path of ['/fundamentals/redis-overview/', '/replication-ha/cluster/', '/patterns/caching-patterns/', '/advanced/lua-scripting/', '/persistence/rdb/', '/persistence/aof/', '/data-structures/strings/', '/data-structures/lists/', '/data-structures/sorted-sets/', '/data-structures/streams/']) {
     await page.goto(path);
     await expect(page.locator('.d2-diagram').first()).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(391);
+    // The auto-loaded viewer fits after hydration/ResizeObserver has settled.
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth), { message: path }).toBeLessThanOrEqual(391);
   }
 });
 
@@ -137,8 +141,8 @@ test('không JavaScript vẫn đọc SVG, source, các bước và transcript', 
   await expect(diagram.locator('.d2-diagram-light').first()).toBeVisible();
   await diagram.locator('.d2-board-fallback > summary').click();
   await expect(diagram.locator('.d2-board-fallback .d2-diagram')).toHaveCount(2);
-  await diagram.locator('.d2-source-fallback > summary').click();
-  await expect(diagram.locator('.d2-source-fallback pre')).toContainText('MIGRATING');
+  await diagram.locator('.d2-source-menu > summary').click();
+  await expect(diagram.locator('.d2-source-menu pre')).toContainText('MIGRATING');
   await page.goto('/fundamentals/redis-overview/');
   await expect(page.locator('.terminal-session')).toContainText('SET user:1:name "Hiep"');
   await context.close();
