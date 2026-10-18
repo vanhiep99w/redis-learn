@@ -45,13 +45,15 @@ Nhưng Hash không phải lúc nào cũng thắng String JSON, và bản thân n
 
 Hash là **record type**: một Redis key chứa nhiều cặp `field → value`.
 
-```
-user:42 (1 Redis key)
-├── name        → "Hiệp"
-├── email       → "hiep@example.com"
-├── logins      → "128"        ← value vẫn là string, nhưng HINCRBY parse số
-├── plan        → "pro"
-└── updated_at  → "1783400100"
+```d2 title="Hash lưu nhiều field/value trong một Redis key"
+group: "user:42 — một Redis key" {
+  grid-columns: 1
+  n0: "name → Hiệp"
+  n1: "email → hiep@example.com"
+  n2: "logins → 128\nValue vẫn là String, HINCRBY parse số"
+  n3: "plan → pro"
+  n4: "updated_at → 1783400100"
+}
 ```
 
 Điểm quan trọng:
@@ -102,19 +104,22 @@ hash-max-listpack-value 64
 
 Listpack là cách Redis “đóng gói” Hash nhỏ như một mảng field/value liền nhau để tiết kiệm overhead. Nhìn qua, O(N) nghe đáng sợ. Nhưng N mặc định chỉ tối đa 128 field, và listpack nằm trong một vùng memory liên tục:
 
-```diagram
-Bước 1: Redis đọc pointer tới value object của key "user:42"
-
-Bước 2: object đang encoded=listpack
-
-Bước 3: scan tuyến tính:
-┌────────┬────────┬────────┬────────┬────────┬────────┬─────┐
-│ header │ field1 │ value1 │ field2 │ value2 │ field3 │ ... │
-└────────┴────────┴────────┴────────┴────────┴────────┴─────┘
-                    ↑
-                 so sánh field cần tìm
-
-Bước 4: gặp field → trả value ngay bên cạnh
+```d2 title="HGET scan field/value liên tiếp trong listpack"
+direction: down
+lookup: "1. Key user:42 → value object"
+encoding: "2. encoded=listpack"
+pack: "3. Scan các cặp field/value" {
+  grid-columns: 7
+  n0: header
+  n1: field1
+  n2: value1
+  n3: field2
+  n4: value2
+  n5: field3
+  n6: "…"
+}
+result: "4. Field khớp → trả value bên cạnh"
+lookup -> encoding -> pack -> result
 ```
 
 Vì sao nhanh trong thực tế?
@@ -133,14 +138,20 @@ Vì sao nhanh trong thực tế?
 
 Hashtable là chế độ Redis dùng khi Hash đã đủ lớn để scan tuyến tính không còn là lựa chọn tốt. Khi vượt ngưỡng, Redis chuyển Hash thành `dict`:
 
-```diagram
-hash object
-└── dict
-    ├── ht[0] bucket array
-    │   ├── bucket 0 → dictEntry(field="uid", value="42")
-    │   ├── bucket 1 → NULL
-    │   └── bucket 2 → dictEntry(field="role", value="admin") → ...
-    └── ht[1] bucket array (chỉ tồn tại trong lúc rehash)
+```d2 title="Hash lớn dùng dictionary và bucket array"
+direction: right
+hash: "Hash object"
+dict: dict
+old: "ht[0] — bucket array" {
+  grid-columns: 1
+  b0: "Bucket 0\ndictEntry: uid → 42"
+  b1: "Bucket 1\nNULL"
+  b2: "Bucket 2\ndictEntry: role → admin\n→ entry tiếp theo nếu collision"
+}
+new: "ht[1] — chỉ có trong lúc rehash"
+hash -> dict
+dict -> old
+dict -> new
 ```
 
 Lookup trung bình O(1): hash field name → bucket → so sánh field trong chain.
@@ -156,16 +167,15 @@ Nhưng hashtable tốn memory hơn vì mỗi field/value có thêm:
 
 Incremental rehashing là cách Redis resize từ từ để không bắt một command gánh toàn bộ chi phí di chuyển bucket. Redis dict không resize bằng cách dời toàn bộ bucket trong một cú. Khi cần mở rộng/thu nhỏ, Redis giữ **2 hash table** (`ht[0]` cũ, `ht[1]` mới) và mỗi command làm một phần `rehashstep()`.
 
-```diagram
-ht[0] size=1024, used=1024          → bảng cũ
-ht[1] size=2048, used tăng dần      → bảng mới
-rehashidx = bucket đang được chuyển
-
-Mỗi HGET/HSET/HDEL:
-1. dời vài bucket từ ht[0] sang ht[1]
-2. read/delete kiểm tra cả hai table
-3. write mới đi vào ht[1]
-4. khi ht[0] hết bucket → ht[1] trở thành table chính
+```d2 title="Incremental rehash kiểm tra hai table trong lúc resize"
+direction: right
+n0: "ht[0]: size=1024, used=1024\nht[1]: size=2048\nrehashidx theo dõi bucket đang chuyển"
+n1: "Mỗi HGET/HSET/HDEL\nDời một số bucket sang ht[1]"
+n2: "Read/delete: kiểm tra cả hai table\nWrite mới: đi vào ht[1]"
+n3: "ht[0] hết bucket\nht[1] trở thành table chính"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 > [!NOTE]
@@ -309,15 +319,19 @@ HGETDEL otp:user:42 FIELDS 1 code       # read-once OTP
 
 ### 6.2. Race condition: cùng sửa một JSON blob
 
-```diagram
-T0: Redis có sess = {"cart":"A", "last_seen":100}
-
-T1: Request A GET sess              → cart=A, last_seen=100
-T2: Request B GET sess              → cart=A, last_seen=100
-T3: A đổi cart=B, SET sess          → {"cart":"B", "last_seen":100}
-T4: B đổi last_seen=101, SET sess   → {"cart":"A", "last_seen":101}
-
-Kết quả: cart=B bị mất.
+```d2 title="Lost update khi hai request sửa cùng JSON blob"
+shape: sequence_diagram
+a: "Request A"
+r: "Redis: sess"
+b: "Request B"
+r."T0: cart=A, last_seen=100"
+a -> r: "T1: GET sess"
+r -> a: "cart=A, last_seen=100"
+b -> r: "T2: GET sess"
+r -> b: "cart=A, last_seen=100"
+a -> r: "T3: SET cart=B, last_seen=100"
+b -> r: "T4: SET cart=A, last_seen=101"
+r."cart=B của A bị ghi đè"
 ```
 
 Với Hash:
@@ -395,14 +409,15 @@ HSET obj:123456 789 "abc"
 HSET obj:123456 790 "def"
 ```
 
-```diagram
-ID 123456789
-├── bucket key = obj:123456     (123456789 / 1000)
-└── field      = 789            (123456789 % 1000)
-
-100,000,000 logical entries
-→ 100,000 Redis keys
-→ mỗi key có ~1000 fields
+```d2 title="Bucket pattern giảm số Redis key"
+direction: right
+id: "ID 123456789"
+key: "Bucket key: obj:123456\nfloor(ID / 1000)"
+field: "Field: 789\nID mod 1000"
+savings: "100 triệu logical entries\n≈ 100.000 Redis keys\n≈ 1.000 fields mỗi key"
+id -> key
+id -> field
+key -> savings
 ```
 
 Tại sao tiết kiệm?

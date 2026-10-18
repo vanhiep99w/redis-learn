@@ -379,13 +379,15 @@ Cần LFU metadata để hữu ích.
 
 ### Vì sao big key làm chậm?
 
-```text
-HGETALL hash 1 triệu field
-  -> Redis duyệt nhiều phần tử
-  -> tạo response rất lớn
-  -> giữ event loop lâu
-  -> client khác phải chờ
-  -> network truyền lâu
+```d2 title="Big key tăng chi phí execute và truyền response"
+direction: right
+command: "HGETALL hash 1 triệu field"
+scan: "Duyệt nhiều phần tử\nTạo response lớn"
+loop: "Giữ event loop lâu\nClient khác chờ execute"
+network: "Nhiều bytes phải truyền\nClient parse response lâu"
+command -> scan
+scan -> loop
+scan -> network
 ```
 
 ### Cách xử lý

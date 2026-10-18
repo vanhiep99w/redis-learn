@@ -30,10 +30,18 @@ HTTP request không tự nhớ request trước. Sau khi user đăng nhập, ser
 
 Nếu session nằm trong memory của từng application instance:
 
-```text
-Login qua Pod A → session chỉ ở RAM Pod A
-Request sau vào Pod B → Pod B không biết session → user bị logout
-Pod A restart → toàn bộ session trên Pod A biến mất
+```d2 title="Session chỉ trong RAM một pod gây logout khi route hoặc restart"
+direction: right
+login: "Login qua Pod A"
+a: "Session chỉ ở RAM Pod A"
+b: "Request sau vào Pod B\nKhông biết session"
+restart: "Pod A restart\nRAM session mất"
+logout: "User bị logout"
+login -> a
+a -> b: "Load balancer route khác"
+a -> restart
+b -> logout
+restart -> logout
 ```
 
 Sticky session giảm một phần vấn đề nhưng làm cân bằng tải và deploy khó hơn. Redis tạo một shared session store có TTL, tốc độ thấp và atomic operations:
@@ -284,12 +292,17 @@ Không “đổi tên key” mà vẫn dùng entropy cũ. Tạo token mới bằ
 
 ### 7.1. Logout một thiết bị
 
-```text
-1. Validate cookie format.
-2. DEL/UNLINK session key.
-3. Remove session ID khỏi user-session index (best effort).
-4. Set-Cookie với Max-Age=0.
-5. Response idempotent kể cả key đã hết hạn.
+```d2 title="Logout một thiết bị với cleanup idempotent"
+direction: right
+n0: "Validate cookie format"
+n1: "DEL / UNLINK session key"
+n2: "Remove ID khỏi user-session index\nBest effort"
+n3: "Set-Cookie Max-Age=0"
+n4: "Trả response idempotent\nKể cả session đã hết hạn"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 ### 7.2. Logout all bằng xóa từng session
@@ -317,11 +330,16 @@ Nhiều service có local auth cache cần nhận revoke event. Pub/Sub nhanh nh
 
 Hai request song song cùng đọc JSON, sửa field khác nhau rồi `SET` có thể lost update:
 
-```text
-A đọc cartCount=1, locale=vi
-B đọc cartCount=1, locale=vi
-A ghi cartCount=2, locale=vi
-B ghi cartCount=1, locale=en  ← mất update của A
+```d2 title="Ghi cả session blob có thể làm mất cập nhật song song"
+shape: sequence_diagram
+a: "Request A"
+r: "Session store"
+b: "Request B"
+a -> r: "Đọc cartCount=1, locale=vi"
+b -> r: "Đọc cartCount=1, locale=vi"
+a -> r: "Ghi cartCount=2, locale=vi"
+b -> r: "Ghi cartCount=1, locale=en"
+r."Update cartCount của A bị mất"
 ```
 
 Giải pháp:
@@ -475,12 +493,17 @@ Admin promotion, password reset, account disable phải revoke/rotate session. S
 
 Redis replication thường asynchronous. Flow nguy hiểm:
 
-```text
-T1 primary tạo session, trả login success
-T2 session chưa replicate
-T3 primary chết
-T4 replica được promote, không có session
-→ user bị logout
+```d2 title="Failover có thể làm mất session vừa tạo"
+shape: sequence_diagram
+a: "Application"
+p: "Primary"
+r: "Replica"
+a -> p: "T1: tạo session"
+p -> a: "Login success"
+p."T2: session chưa replicate\nT3: primary chết"
+r."T4: promote, không có session"
+a -> r: "Request tiếp theo GET session"
+r -> a: "nil → user bị logout"
 ```
 
 Đây thường là availability/UX issue, nhưng phải định lượng. Lựa chọn:
@@ -630,10 +653,21 @@ JWT không mặc nhiên an toàn hay “stateless hoàn toàn”: vẫn cần ke
 
 Một Redis session store tốt không chỉ là `SET sid value EX 1800`. Nó là một protocol có lifecycle:
 
-```text
-login → random ID → create với TTL → validate mỗi request
-      → refresh có giới hạn → rotate khi privilege đổi
-      → revoke khi logout/security event → expire/cleanup
+```d2 title="Vòng đời session có TTL và revocation"
+direction: right
+n0: "Login → random ID"
+n1: "Create session với TTL"
+n2: "Validate mỗi request"
+n3: "Refresh có giới hạn"
+n4: "Rotate khi privilege đổi"
+n5: "Revoke khi logout / security event"
+n6: "Expire / cleanup"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
+n4 -> n5
+n5 -> n6
 ```
 
 Ba nguyên tắc:

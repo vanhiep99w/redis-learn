@@ -200,27 +200,27 @@ Muốn làm kiểu query phức tạp trong Redis cần thiết kế index thủ
 
 Hãy hình dung Redis như một process quản lý một keyspace lớn:
 
-```text
-Redis keyspace
-├── "session:abc"       → String      "{user_id:123,...}"   TTL 30m
-├── "user:123"          → Hash        name/email/plan
-├── "queue:email"       → List        [job3, job2, job1]
-├── "post:9:likes"      → Set         {user1,user2,user3}
-├── "leaderboard"       → Sorted Set  user → score
-└── "events"            → Stream      append-only entries
-```
+| Key minh họa | Data type | Value / đặc điểm |
+| --- | --- | --- |
+| `session:abc` | String | `{"user_id":123,...}`, TTL 30 phút |
+| `user:123` | Hash | name / email / plan |
+| `queue:email` | List | job3, job2, job1 |
+| `post:9:likes` | Set | user1, user2, user3 |
+| `leaderboard` | Sorted Set | user → score |
+| `events` | Stream | Append-only entries |
 
 Mỗi command đi vào Redis event loop, được execute tuần tự:
 
-```text
-Client A: INCR counter
-Client B: INCR counter
-Client C: GET counter
-
-Redis execute:
-1. INCR counter
-2. INCR counter
-3. GET counter
+```d2 title="Redis serialize các command từ nhiều client"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis"
+b: "Client B"
+c: "Client C"
+a -> r: "1. INCR counter"
+b -> r: "2. INCR counter"
+c -> r: "3. GET counter"
+r."Thứ tự execution minh họa\nKhông interleave bên trong từng command"
 ```
 
 Vì command được execute tuần tự trên main thread, từng command đơn lẻ là atomic.
@@ -425,7 +425,6 @@ Redis production cần monitor memory, fragmentation, big keys, slow commands, p
 
 Nếu bạn mới học Redis, nên đi theo flow:
 
-```text
 1. Redis Overview
 2. Redis Architecture
 3. Keys, Naming & TTL
@@ -435,7 +434,6 @@ Nếu bạn mới học Redis, nên đi theo flow:
 7. Performance
 8. Patterns & Use Cases
 9. Operations
-```
 
 Gợi ý cụ thể:
 

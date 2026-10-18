@@ -15,7 +15,7 @@ test('mọi fence được render sẵn trong static export', () => {
   for (const path of generatedDocs()) {
     const markdown = readFileSync(path, 'utf8');
     const html = readFileSync(path.replace('content/docs/', 'dist/').replace(/\.md$/, '/index.html'), 'utf8');
-    expect(markdown, path).not.toMatch(/^```mermaid\b/m);
+    expect(markdown, path).not.toMatch(/^\s*(?:```|~~~)(?:mermaid|diagram)\b/m);
     expect(markdown, path).not.toContain('## Mục lục');
     for (const [fence, component] of Object.entries(components)) {
       const count = [...markdown.matchAll(new RegExp('^```' + fence + '(?: |\\n)', 'gm'))].length;
@@ -26,7 +26,7 @@ test('mọi fence được render sẵn trong static export', () => {
     // Icons are embedded from the allowlisted local assets, not fetched by readers.
     expect(html, path).not.toMatch(/<image[^>]+(?:href|xlink:href)="https?:/);
   }
-  expect(diagrams).toBeGreaterThan(100);
+  expect(diagrams).toBeGreaterThanOrEqual(267);
 });
 
 test.beforeEach(async ({ page }) => {
@@ -56,6 +56,25 @@ test('D2: zoom, SVG download, expand và chuyển theme', async ({ page }) => {
   await page.evaluate(() => document.documentElement.classList.add('dark'));
   await expect(diagram.locator('.d2-diagram-dark')).toBeVisible();
   await expect(diagram.locator('.d2-diagram-light')).toBeHidden();
+});
+
+test('RDB: cấu trúc dump.rdb là SVG và các trường theo thứ tự file', async ({ page }) => {
+  await page.goto('/persistence/rdb/');
+  const diagram = page.locator('.d2-interactive').filter({ hasText: 'Cấu trúc logic của file dump.rdb' });
+  const light = diagram.locator('.d2-diagram-light');
+  await expect(light.locator('svg').first()).toBeVisible();
+  const fields = ['Magic string', 'RDB version', 'AUX fields', 'SELECTDB 0', 'RESIZEDB', 'Lặp các key/value', 'SELECTDB tiếp theo', 'EOF', 'CRC64'];
+  const positions = await light.evaluate((element, labels) => labels.map((label) => {
+    const text = [...element.querySelectorAll('text')].find((node) => node.textContent?.includes(label));
+    return text ? text.getBoundingClientRect().top : -1;
+  }), fields);
+  expect(positions.every((top) => top >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  const text = (await light.locator('text').allTextContents()).join(' ');
+  expect(text).toContain('TTL tuyệt đối');
+  expect(text).not.toMatch(/[┌┐└┘│]/);
+  await page.evaluate(() => document.documentElement.classList.add('dark'));
+  await expect(diagram.locator('.d2-diagram-dark')).toBeVisible();
 });
 
 test('D2 steps: resharding chuyển qua từng trạng thái', async ({ page }) => {
@@ -103,7 +122,7 @@ test('Span Waterfall phân biệt thời gian call và execute', async ({ page }
 
 test('mobile: diagram cuộn trong khung, không làm tràn trang', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const path of ['/fundamentals/redis-overview/', '/replication-ha/cluster/', '/patterns/caching-patterns/', '/advanced/lua-scripting/']) {
+  for (const path of ['/fundamentals/redis-overview/', '/replication-ha/cluster/', '/patterns/caching-patterns/', '/advanced/lua-scripting/', '/persistence/rdb/', '/persistence/aof/', '/data-structures/strings/', '/data-structures/lists/', '/data-structures/sorted-sets/', '/data-structures/streams/']) {
     await page.goto(path);
     await expect(page.locator('.d2-diagram').first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(391);

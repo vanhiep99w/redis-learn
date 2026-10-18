@@ -84,11 +84,11 @@ Hãy tưởng tượng bạn cần xếp các địa điểm trên bản đồ v
 
 Sorted Set cần một score tuyến tính:
 
-```text
-score nhỏ  ───────────────────────────────→  score lớn
-```
+Score tăng dần từ nhỏ tới lớn trong Sorted Set.
 
 Bản đồ lại là 2 chiều:
+
+<!-- diagram-text: Hệ trục tọa độ minh họa vị trí tương đối; giữ căn cột theo hai trục, không phải sơ đồ luồng. -->
 
 ```text
 latitude ↑
@@ -100,22 +100,18 @@ latitude ↑
 
 Redis giải bằng **Geohash + Z-order/Morton code** (đường đi kiểu chữ Z, còn gọi là Morton code, để biến không gian 2D thành thứ tự 1D): chia longitude và latitude thành bit, rồi đan xen chúng.
 
-```diagram
-Bước 1: Chuẩn hóa tọa độ
-  longitude: [-180, 180]
-  latitude : [-85.05112878, 85.05112878]
-
-Bước 2: Binary split từng chiều
-  lon bits:  1 0 1 1 0 0 ...  (26 bit)
-  lat bits:  1 1 0 0 1 0 ...  (26 bit)
-
-Bước 3: Interleave
-  lon0 lat0 lon1 lat1 lon2 lat2 ...
-  1    1    0    1    1    0    ...  → 52-bit integer
-
-Bước 4: Lưu vào ZSet score
-  ZADD drivers 3942139036372049 "driver:1"
+```d2 title="Từ tọa độ tới ZSet score"
+direction: right
+n0: "1. Chuẩn hóa tọa độ\nlon: [-180, 180]\nlat: [-85.05112878, 85.05112878]"
+n1: "2. Binary split mỗi chiều\n26 bit longitude + 26 bit latitude"
+n2: "3. Interleave\nlon0 lat0 lon1 lat1 …\nTổng 52 bit"
+n3: "4. Lưu integer vào ZSet score\nZADD drivers 3942139036372049 driver:1"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
+
+Ví dụ interleave: `lon=1 0 1 …`, `lat=1 1 0 …` tạo `1 1 0 1 1 0 …`; đây là thứ tự bit, không phải biểu diễn một tọa độ đo thực tế.
 
 52 bit được chọn vì Redis Sorted Set dùng `double` làm score; `double` biểu diễn chính xác integer tới 2^53. 52-bit geohash nằm an toàn trong vùng này.
 
@@ -249,34 +245,21 @@ Nói đời thường, `GEOSEARCH` không “nhìn quanh” từng điểm trên
 
 Quy trình tư duy:
 
-```diagram
-Input:
-  center = (106.63, 10.82)
-  radius = 3 km
-
-Step 1 — Chọn precision/geohash area
-  Chọn mức geohash đủ lớn để phủ vùng cần tìm.
-
-Step 2 — Lấy ô trung tâm + 8 ô lân cận
-  ┌─────┬─────┬─────┐
-  │ NW  │  N  │ NE  │
-  ├─────┼─────┼─────┤
-  │ W   │  ●  │ E   │   ● = center
-  ├─────┼─────┼─────┤
-  │ SW  │  S  │ SE  │
-  └─────┴─────┴─────┘
-
-Step 3 — Mỗi ô thành một score range
-  [min_score_cell, max_score_cell]
-
-Step 4 — Scan zset range
-  Lấy candidate bằng skiplist/range scan.
-
-Step 5 — Decode + tính distance thật
-  Loại điểm nằm trong bounding box nhưng ngoài hình tròn.
-
-Step 6 — Sort/COUNT
-  ASC/DESC nếu cần, rồi cắt COUNT.
+```d2 title="GEOSEARCH: từ vùng phủ tới kết quả"
+direction: right
+n0: "Input\ncenter=(106.63, 10.82)\nradius=3 km"
+n1: "1. Chọn precision / geohash area"
+n2: "2. Ô trung tâm và 8 ô lân cận\nNW, N, NE, W, center, E, SW, S, SE"
+n3: "3. Mỗi ô thành score range\n[min_score_cell, max_score_cell]"
+n4: "4. Scan ZSet range\nLấy candidates"
+n5: "5. Decode và tính distance thật\nLoại ngoài vùng truy vấn"
+n6: "6. Sort ASC/DESC và COUNT\nTheo options của query"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
+n4 -> n5
+n5 -> n6
 ```
 
 Tại sao phải 9 ô? Đây là cách Redis tránh bỏ sót hàng xóm đứng ngay bên kia vạch kẻ ô. Vì boundary problem, nếu user đứng sát ranh giới ô, điểm gần nhất có thể nằm ở ô bên cạnh.
@@ -480,16 +463,22 @@ GEOSEARCH ship:{hcm}:online FROMLONLAT 106.652 10.795 BYRADIUS 2 km ASC COUNT 20
 
 Luồng match thực tế:
 
-```diagram
-Order created
-  │
-  ├─ GEOSEARCH radius 2km COUNT 20
-  │    └─ đủ candidate? yes → scoring service
-  │
-  ├─ nếu thiếu → radius 5km COUNT 30
-  │    └─ đủ candidate? yes → scoring service
-  │
-  └─ nếu vẫn thiếu → fallback region queue / manual dispatch
+```d2 title="Mở rộng bán kính tìm shipper trước khi fallback"
+direction: down
+order: "Order created"
+small: "GEOSEARCH radius 2 km\nCOUNT 20"
+enough: "Đủ candidate?" {shape: diamond}
+large: "GEOSEARCH radius 5 km\nCOUNT 30"
+enough2: "Đủ candidate?" {shape: diamond}
+score: "Scoring service"
+fallback: "Region queue / manual dispatch"
+order -> small
+small -> enough
+enough -> score: "Có"
+enough -> large: "Thiếu"
+large -> enough2
+enough2 -> score: "Có"
+enough2 -> fallback: "Vẫn thiếu"
 ```
 
 Bài học: Redis chỉ trả lời “ai ở gần” — nhanh và rẻ; business logic gán đơn nằm ngoài. Key shard theo thành phố, hash tag `{hcm}` để các key liên quan cùng slot trong [Cluster](./cluster.md). Không bao giờ query toàn quốc cho một đơn nội thành.

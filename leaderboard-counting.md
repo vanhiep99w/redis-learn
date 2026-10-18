@@ -380,8 +380,15 @@ lb:s27:shard:0 ... lb:s27:shard:63
 
 Update scale tốt. Nhưng global top K cần lấy top K từ mỗi shard rồi merge:
 
-```text
-64 shards × top 100 → merge 6.400 rows → global top 100
+```d2 title="Fan-in top K từ các shard"
+direction: right
+n0: "64 shards"
+n1: "Lấy local top 100 mỗi shard"
+n2: "Merge 6.400 rows"
+n3: "Chọn global top 100"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Điều này đúng cho top K vì phần tử không nằm trong top K của shard mình không thể vào global top K. Tuy nhiên **global rank của một player** khó hơn: phải đếm trên mọi shard số member có score cao hơn, xử lý tie, tổng hợp 64 query.
@@ -562,12 +569,16 @@ AOF/replication giảm rủi ro nhưng không thay audit ledger/idempotency. Đ�
 
 ### 13.2. Rebuild không downtime
 
-```text
-1. Replay vào key version mới lb:s27:rebuild:v2
-2. Validate ZCARD, sample score, checksum/top K
-3. Atomically switch pointer/config sang v2
-4. Giữ key cũ để rollback
-5. Expire/delete cũ sau observation window
+```d2 mode=steps title="Rebuild leaderboard rồi chuyển pointer, giữ rollback window"
+serving: "Serving key cũ"
+new: "Key mới lb:s27:rebuild:v2\nChưa phục vụ reads"
+steps: {
+  replay: { new: "Replay events vào v2" }
+  validate: { new: "Validate ZCARD, sample score\nchecksum / top K" }
+  switch: { serving: "Atomically switch pointer/config → v2"; new: "v2 phục vụ reads" }
+  rollback: { serving: "Key cũ giữ trong rollback window" }
+  cleanup: { serving: "Hết observation window\nExpire/delete key cũ" }
+}
 ```
 
 Không rebuild đè trực tiếp key đang phục vụ nếu reader có thể thấy trạng thái nửa vời.

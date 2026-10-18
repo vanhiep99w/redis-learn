@@ -45,16 +45,24 @@ AOF đổi lấy độ bền bằng chi phí I/O đều đặn và file lớn h�
 
 AOF (Append Only File) ghi lại **mọi lệnh làm thay đổi dataset** (write command) vào một file log, theo đúng thứ tự thực thi. Khi Redis khởi động lại, nó **replay** toàn bộ log này từ đầu → tái tạo chính xác trạng thái cuối cùng.
 
-```diagram
-Client gửi lệnh ghi        AOF file (append liên tục)
-─────────────────          ─────────────────────────
-SET user:1 "An"     ──▶    SET user:1 "An"
-INCR views          ──▶    INCR views
-INCR views          ──▶    INCR views
-LPUSH q "job1"      ──▶    LPUSH q "job1"
-DEL user:1          ──▶    DEL user:1
-
-Restart → replay từ trên xuống → dataset y hệt lúc crash
+```d2 title="AOF append và replay khi restart"
+shape: sequence_diagram
+c: "Client"
+r: "Redis"
+a: "AOF file"
+restart: "Redis sau restart"
+c -> r: "SET user:1 \"An\""
+r -> a: "Append SET user:1 \"An\""
+c -> r: "INCR views — lần 1"
+r -> a: "Append INCR views"
+c -> r: "INCR views — lần 2"
+r -> a: "Append INCR views"
+c -> r: "LPUSH q \"job1\""
+r -> a: "Append LPUSH q \"job1\""
+c -> r: "DEL user:1"
+r -> a: "Append DEL user:1"
+restart -> a: "Đọc phần AOF còn hợp lệ theo thứ tự"
+restart."Replay để dựng lại dataset"
 ```
 
 Khác biệt cốt lõi so với [RDB](./rdb.md):
@@ -94,31 +102,28 @@ Khác biệt cốt lõi so với [RDB](./rdb.md):
 
 Đây là phần cần hiểu thật kỹ, vì nó giải thích vì sao `appendfsync` lại quyết định độ bền. Một lệnh ghi đi qua **ba tầng**, không phải một:
 
-```diagram
-Client: SET balance 1000
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ (1) Thực thi trong memory  → dataset đổi ngay               │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ (2) Append vào AOF buffer (trong RAM của Redis)             │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ (3a) write()  → đẩy buffer xuống OS page cache (RAM kernel) │
-│ (3b) fsync()  → OS flush page cache xuống ĐĨA vật lý        │
-└─────────────────────────────────────────────────────────────┘
+```d2 title="Các lớp bộ nhớ trên đường ghi AOF"
+direction: right
+n0: "Client: SET balance 1000"
+n1: "1. Execute trong Redis memory\nDataset đổi ngay"
+n2: "2. Append vào AOF buffer\nRAM của Redis"
+n3: "3a. write()\nOS page cache — RAM kernel"
+n4: "3b. fsync()\nFlush xuống đĩa vật lý"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 Điểm "aha" gây hiểu lầm nhiều nhất: **`write()` KHÔNG có nghĩa là đã ở đĩa.**
 
-```diagram
-Redis buffer ──write()──▶ OS page cache ──fsync()──▶ ĐĨA vật lý
-              (nhanh)      (vẫn trong RAM)  (chậm)    (mới thật sự bền)
+```d2 title="write không đồng nghĩa dữ liệu đã bền trên đĩa"
+direction: right
+buffer: "Redis buffer"
+cache: "OS page cache\nVẫn trong RAM"
+disk: "Đĩa vật lý\nSau fsync thành công"
+buffer -> cache: "write() — nhanh"
+cache -> disk: "fsync() — chậm hơn"
 ```
 
 Khi bạn `write()`, dữ liệu chỉ mới sang **page cache của kernel** — vùng RAM mà OS dùng làm bộ đệm đĩa. Nếu **mất điện đột ngột** lúc này, dữ liệu trong page cache **bay mất**. Chỉ sau `fsync()` — lệnh ép OS ghi page cache xuống đĩa vật lý — dữ liệu mới thực sự bền.
@@ -132,12 +137,11 @@ Khi bạn `write()`, dữ liệu chỉ mới sang **page cache của kernel** �
 
 `appendfsync` quyết định Redis gọi `fsync()` thường xuyên tới đâu — tức bạn mất tối đa bao nhiêu khi mất điện.
 
-```diagram
-        Độ bền cao ◀───────────────────────────────▶ Tốc độ cao
-        always            everysec                 no
-        (mất ~0)          (mất ~1s)                (mất tuỳ OS)
-        chậm nhất         cân bằng (mặc định)      nhanh nhất
-```
+| Policy | Độ bền khi crash | Đánh đổi |
+| --- | --- | --- |
+| `always` | Mục tiêu mất gần 0 sau fsync thành công | Chờ đĩa, chậm nhất |
+| `everysec` | Có thể mất khoảng 1 giây trong điều kiện thông thường | Cân bằng, mặc định |
+| `no` | Phụ thuộc lịch flush của OS | Nhanh, cửa sổ mất dữ liệu khó kiểm soát |
 
 ### 5.1 `appendfsync always`
 
@@ -153,11 +157,16 @@ fsync **mỗi giây một lần** bởi một luồng nền (background thread).
 - **Mất khi crash:** tối đa ~1 giây thay đổi gần nhất.
 - **Giá:** rất nhẹ. Đây là điểm cân bằng vàng mà đa số production dùng.
 
-```diagram
-giây thứ N:  write write write write ... (nhanh, không chờ đĩa)
-             ────────────────────────────┐
-                                          ▼
-                            background fsync 1 lần/giây
+```d2 title="everysec tách write khỏi background fsync"
+shape: sequence_diagram
+main: "Main thread"
+os: "OS page cache"
+bg: "Background fsync"
+disk: "Đĩa"
+main -> os: "write — nhiều lần trong giây N"
+main."Tiếp tục xử lý command, không đợi từng fsync"
+bg -> os: "fsync xấp xỉ mỗi giây"
+os -> disk: "Flush các write đang chờ"
 ```
 
 ### 5.3 `appendfsync no`
@@ -185,12 +194,20 @@ Hiểu nhầm phổ biến: nghĩ `everysec` = “mỗi giây mới `SET` xong�
 | `everysec` | Ngay khi command execute | Sau `write` vào page cache (không chờ fsync) | Background fsync ≤ ~1s sau |
 | `no` | Ngay khi command execute | Sau `write` vào page cache | Khi OS flush (có thể hàng chục giây) |
 
-```text
-everysec (mặc định):
-  t=0.0  SET a 1  → RAM OK, write() page cache, reply OK ngay
-  t=0.3  SET b 2  → tương tự
-  t=1.0  background fsync → a,b mới chắc trên đĩa
-  crash lúc t=0.8 → có thể mất a,b dù client đã thấy OK
+```d2 title="everysec: reply có thể đi trước fsync"
+shape: sequence_diagram
+c: "Client"
+r: "Redis"
+cache: "OS page cache"
+disk: "Đĩa"
+c -> r: "t=0.0: SET a 1"
+r -> cache: "write()"
+r -> c: "OK, chưa nhất thiết bền trên đĩa"
+c -> r: "t=0.3: SET b 2"
+r -> cache: "write()"
+r -> c: "OK"
+r."Nếu crash t=0.8: a,b có thể mất"
+cache -> disk: "Nếu tiếp tục tới t≈1.0: background fsync"
 ```
 
 > [!WARNING]
@@ -207,7 +224,9 @@ Phần này giúp bạn hình dung file AOF thật sự chứa gì, để khi c�
 
 Khác với binary của [RDB](./rdb.md), AOF là **text theo giao thức RESP** (Redis Serialization Protocol — format Redis dùng để mã hoá command/reply, xem [Redis Overview](./redis-overview.md)) — con người đọc được. Mỗi lệnh được mã hoá dạng RESP array.
 
-```diagram
+<!-- diagram-text: RESP payload cần giữ nguyên thứ tự dòng và byte length. -->
+
+```text
 # Redis nhận: SET user:1 "An"
 # AOF ghi (RESP):
 *3            ← array 3 phần tử
@@ -263,26 +282,25 @@ Rewrite không phải "nén text" đơn thuần; nó tạo lại lịch sử t�
 
 **AOF rewrite** tạo ra một AOF **mới, tối giản**: thay vì lịch sử thao tác, nó ghi **tập lệnh ngắn nhất đủ tái tạo trạng thái hiện tại**.
 
-```diagram
-AOF cũ (dài dòng)                 AOF sau rewrite (tối giản)
-─────────────────                 ──────────────────────────
-INCR views     × 1,000,000   ──▶  SET views 1000000
-LPUSH q a
-LPUSH q b
-RPOP q                        ──▶  RPUSH q b
-SET x 1
-SET x 2
-SET x 3                       ──▶  SET x 3
-```
+| Lịch sử AOF cũ | Trạng thái tương đương sau rewrite |
+| --- | --- |
+| `INCR views` × 1.000.000 | `SET views 1000000` |
+| `LPUSH q a`, `LPUSH q b`, `RPOP q` | `RPUSH q b` |
+| `SET x 1`, `SET x 2`, `SET x 3` | `SET x 3` |
 
 Cơ chế giống [RDB](./rdb.md): Redis `fork()` (tạo tiến trình con) và dựa vào Copy-on-Write (CoW — chỉ copy page bộ nhớ khi parent/child ghi khác nhau) để con duyệt dataset hiện tại và ghi ra AOF mới. Mọi lệnh ghi **xảy ra trong lúc rewrite** được giữ trong buffer và nối vào cuối để không mất thay đổi.
 
-```diagram
-fork() ──▶ Child: duyệt dataset → ghi AOF mới (tối giản)
-   │
-Parent: tiếp tục phục vụ + gom lệnh mới vào buffer
-   │
-Child xong → nối buffer lệnh mới vào → thay AOF cũ
+```d2 title="Rewrite: child ghi base, parent vẫn nhận write"
+shape: sequence_diagram
+p: "Parent"
+c: "Child"
+base: "AOF mới"
+tail: "Write mới"
+p -> c: "fork() — snapshot qua CoW"
+c -> base: "Duyệt dataset và ghi dạng tối giản"
+p -> tail: "Tiếp tục phục vụ, giữ các write phát sinh"
+c -> p: "Hoàn thành base"
+p."Chuyển sang AOF mới cùng phần write phát sinh"
 ```
 
 ### 7.3 Khi nào rewrite tự chạy
@@ -296,11 +314,13 @@ auto-aof-rewrite-percentage 100   # file to gấp đôi (100%) so với lần re
 auto-aof-rewrite-min-size 64mb    # nhưng chỉ khi file ≥ 64MB (tránh rewrite khi còn bé)
 ```
 
-```diagram
-Kích thước AOF vượt max(base × (1 + 100%), 64MB)?
-        │
-        ├─ Có → BGREWRITEAOF tự động
-        └─ Chưa → tiếp tục append
+```d2 title="Điều kiện auto rewrite với cấu hình minh họa"
+direction: down
+check: "AOF vượt ngưỡng tăng 100%\nvà đạt tối thiểu 64 MB?" {shape: diamond}
+yes: "BGREWRITEAOF tự động"
+no: "Tiếp tục append"
+check -> yes: "Có"
+check -> no: "Chưa"
 ```
 
 Rewrite thủ công:
@@ -320,19 +340,23 @@ Multi-Part AOF là cách Redis 7 làm AOF dễ quản lý và restart nhanh hơn
 
 Từ Redis 7.0, AOF không còn là một file duy nhất mà là **multi-part AOF** (AOF nhiều phần): một base + các file incremental, quản lý bởi một manifest.
 
-```diagram
-appenddir/                           (thư mục appenddirname)
-├── appendonly.aof.manifest          ← danh mục: file nào là base, file nào incr
-├── appendonly.aof.1.base.rdb        ← BASE: snapshot trạng thái (định dạng RDB!)
-└── appendonly.aof.1.incr.aof        ← INCR: các lệnh ghi sau base (RESP)
-```
+<Files>
+  <Folder name="appenddir/ — appenddirname" defaultOpen>
+    <File name="appendonly.aof.manifest — danh mục base/incr" />
+    <File name="appendonly.aof.1.base.rdb — BASE: snapshot RDB" />
+    <File name="appendonly.aof.1.incr.aof — INCR: lệnh ghi RESP" />
+  </Folder>
+</Files>
 
 Ý tưởng thông minh: **base file dùng định dạng RDB** (nhị phân, compact), incr file dùng RESP (log lệnh). Đây gọi là **RDB preamble** / **AOF-use-RDB-preamble** (phần mở đầu của AOF là một snapshot RDB) — kết hợp cái tốt nhất của hai thế giới:
 
-```diagram
-Rewrite (Redis 7+):
-  base = snapshot RDB gọn của dataset hiện tại   ← load nhanh
-  + incr = lệnh ghi mới tích luỹ sau đó          ← độ bền ~1s
+```d2 title="Multi-Part AOF kết hợp base và incremental log"
+direction: right
+base: "BASE\nSnapshot RDB của dataset\nLoad nhanh"
+incr: "INCR\nCác lệnh ghi sau base\nDurability theo fsync policy"
+restore: "Dataset sau recovery"
+base -> restore: "Load trước"
+incr -> restore: "Replay sau"
 ```
 
 - **Restart nhanh hơn** vì phần lớn dữ liệu ở base RDB binary (load thẳng), chỉ replay phần incr nhỏ.
@@ -389,27 +413,29 @@ Recovery là nơi AOF chứng minh giá trị: Redis đọc lại những gì đ
 
 Khi Redis start với `appendonly yes`, nó **ưu tiên AOF** hơn RDB (vì AOF thường mới hơn):
 
-```diagram
-Redis khởi động
-   │
-   ├─ appendonly yes?
-   │     │
-   │     ├─ Có → load từ AOF
-   │     │        ├─ (Redis 7) load base RDB → nhanh
-   │     │        └─ replay incr AOF → dựng lại tới lệnh cuối
-   │     │
-   │     └─ Không → load từ dump.rdb (xem [RDB])
-   │
-   └─ Xong → sẵn sàng phục vụ
+```d2 title="Chọn nguồn phục hồi khi khởi động"
+direction: down
+start: "Redis khởi động"
+aof: "appendonly yes?" {shape: diamond}
+base: "Load BASE\nRDB hoặc AOF theo manifest"
+incr: "Replay INCR AOF theo thứ tự"
+rdb: "Load dump.rdb nếu có"
+ready: "Sẵn sàng phục vụ"
+start -> aof
+aof -> base: "Có — ưu tiên AOF"
+base -> incr
+incr -> ready
+aof -> rdb: "Không"
+rdb -> ready
 ```
 
 So sánh tốc độ restart:
 
-```diagram
-RDB thuần:            load binary snapshot            ── nhanh nhất
-AOF (Redis 6, cũ):    replay TẤT CẢ lệnh              ── chậm nhất
-AOF (Redis 7, multi): load base RDB + replay incr nhỏ ── nhanh, gần RDB
-```
+| Nguồn recovery | Cách load | Đặc điểm |
+| --- | --- | --- |
+| RDB thuần | Load binary snapshot | Thường nhanh, phụ thuộc dataset và đĩa |
+| AOF cũ, toàn RESP | Replay mọi lệnh | Có thể chậm khi log lớn |
+| Multi-Part AOF, base RDB | Load base rồi replay incr | Giảm phần cần replay, thường gần RDB hơn |
 
 > [!NOTE]
 > Nếu bật **cả RDB và AOF**, Redis khởi động từ **AOF** (mới hơn), RDB chỉ đóng vai backup/replication. Đây là setup hybrid được khuyến nghị — xem [Persistence Strategies](./persistence-strategies.md).
@@ -420,7 +446,9 @@ Kiểm tra trạng thái AOF:
 INFO persistence
 ```
 
-```diagram
+<!-- diagram-text: Output INFO persistence minh họa, không phải sơ đồ. -->
+
+```text
 aof_enabled:1
 aof_rewrite_in_progress:0
 aof_last_rewrite_time_sec:2
@@ -517,21 +545,13 @@ Vì AOF là text RESP, nó trở thành một "audit log" thô cho các thao tá
 
 ### 13.1 Bật AOF cho cache thuần
 
-```diagram
-❌ Redis chỉ là cache trước DB + bật AOF everysec/always
-   → tốn I/O, đĩa, latency cho dữ liệu vốn warm lại được
-
-✅ Cache thuần → RDB (hoặc thậm chí không persistence)
-```
+- **Tránh:** cache thuần warm lại được từ DB nhưng bật AOF `everysec`/`always` mà không có yêu cầu durability; phải trả thêm I/O, đĩa và latency.
+- **Cân nhắc:** RDB thưa hoặc không persistence, tùy chi phí cold-start.
 
 ### 13.2 Chọn `always` mà không đo, trên đĩa chậm
 
-```diagram
-❌ appendfsync always trên HDD/EBS chậm
-   → mỗi write chờ đĩa → throughput sụp, p99 nổ
-
-✅ always chỉ trên NVMe/SSD nhanh, sau khi benchmark
-```
+- **Tránh:** `appendfsync always` trên HDD/EBS chậm mà chưa đo; mỗi write phải chờ fsync, throughput và P99 có thể xấu đi.
+- **Nên làm:** benchmark trên loại đĩa thực tế; SSD/NVMe nhanh cũng không thay thế việc đo.
 
 Đo trước: [Benchmarking](./benchmarking.md).
 
@@ -541,12 +561,8 @@ Vì AOF là text RESP, nó trở thành một "audit log" thô cho các thao tá
 
 ### 13.4 Tắt `aof-load-truncated`
 
-```diagram
-❌ aof-load-truncated no + crash làm dòng cuối dở
-   → Redis TỪ CHỐI khởi động → downtime kéo dài
-
-✅ giữ mặc định yes → bỏ phần dở, start được
-```
+- Với `aof-load-truncated no`, phần AOF cuối bị cắt dở có thể khiến Redis từ chối khởi động.
+- Giữ mặc định `yes` nếu policy cho phép bỏ phần cuối chưa hoàn chỉnh để start; lỗi corruption khác vẫn cần xử lý riêng.
 
 ### 13.5 Tưởng AOF thay thế được backup
 
@@ -569,12 +585,12 @@ Hai tiến trình `fork` + CoW cùng lúc nhân đôi áp lực RAM/I/O. Giám s
 | Backup/clone | Lý tưởng | Cồng kềnh | Dùng RDB để backup |
 | Độ bền | Thấp | Cao | Cao |
 
-```diagram
-Chịu mất vài phút, cần gọn nhẹ + backup?        ─▶ RDB
-Không được mất quá ~1 giây?                       ─▶ AOF (everysec)
-Không được mất gì + đĩa nhanh?                    ─▶ AOF (always)
-Production quan trọng, muốn cả bền lẫn backup?   ─▶ RDB + AOF (hybrid)
-```
+| Yêu cầu | Hướng chọn |
+| --- | --- |
+| Chấp nhận mất vài phút, backup gọn | RDB |
+| Cửa sổ mất dữ liệu khoảng 1 giây | AOF `everysec` |
+| Giảm cửa sổ mất sau ACK, chấp nhận chờ đĩa | AOF `always` và kiểm chứng storage |
+| Vừa durability vừa snapshot backup | RDB + AOF; vẫn cần backup off-site |
 
 ### Khi nào KHÔNG nên dùng AOF
 
@@ -603,20 +619,14 @@ Production quan trọng, muốn cả bền lẫn backup?   ─▶ RDB + AOF (hyb
 
 ## 16. Tóm tắt / Cheat sheet
 
-```diagram
-┌─────────────────────── Redis AOF cheat sheet ───────────────────────┐
-│ AOF = log mọi lệnh GHI, replay khi restart → độ bền cao            │
-│ write() ≠ bền!  Chỉ fsync() mới đẩy xuống ĐĨA vật lý               │
-│ appendfsync always   → mất ~0,   chậm, cần đĩa nhanh              │
-│ appendfsync everysec → mất ~1s,  cân bằng (MẶC ĐỊNH)             │
-│ appendfsync no       → mất nhiều, nhanh (hiếm dùng)               │
-│ Rewrite = viết lại log tối giản (fork + CoW như BGSAVE)          │
-│ Redis 7 Multi-Part AOF: base RDB + incr RESP → restart nhanh     │
-│ Khởi động ưu tiên AOF hơn RDB (AOF mới hơn)                       │
-│ Giữ aof-load-truncated yes. Giám sát disk + aof_last_write_status│
-│ AOF ≠ backup off-site. Cache thuần thường không cần AOF.         │
-└─────────────────────────────────────────────────────────────────────┘
-```
+- AOF ghi lại effects của write và replay khi restart.
+- `write()` mới vào OS page cache; `fsync()` mới yêu cầu flush xuống storage.
+- `always`: chờ fsync; `everysec`: cân bằng mặc định, có cửa sổ mất dữ liệu; `no`: phụ thuộc OS.
+- Rewrite tạo log tối giản từ dataset, có chi phí fork/CoW.
+- Multi-Part AOF Redis 7+ dùng manifest, BASE và INCR; base RDB giúp load nhanh.
+- Nếu bật AOF, Redis ưu tiên nguồn AOF hơn `dump.rdb` khi start.
+- Giám sát disk, `aof_last_write_status`, rewrite và fsync; hiểu tác động `aof-load-truncated`.
+- AOF không thay backup off-site; cache thuần có thể không cần AOF.
 
 3 nguyên tắc nhớ lâu:
 

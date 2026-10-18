@@ -30,10 +30,7 @@
 
 Redis nhanh không chỉ vì “nằm trong RAM”. Redis nhanh vì thiết kế kiến trúc rất nhất quán:
 
-```text
-Một main event loop xử lý command tuần tự trên keyspace trong RAM.
-Các việc nặng hoặc I/O chậm được đẩy ra background thread/process khi có thể.
-```
+Một main event loop xử lý command tuần tự trên keyspace trong RAM. Các việc nặng hoặc I/O chậm được đẩy ra background thread/process khi có thể.
 
 Điểm cốt lõi:
 
@@ -205,10 +202,7 @@ Event loop giúp Redis giữ request path cực ngắn.
 
 Redis thường được mô tả là single-threaded. Câu chính xác hơn:
 
-```text
-Redis execute command trên keyspace bằng một main thread.
-Một số I/O/background work có thể dùng thread/process khác.
-```
+Redis execute command trên keyspace bằng một main thread. Một số I/O/background work có thể dùng thread/process khác.
 
 ### Lợi ích
 
@@ -230,13 +224,19 @@ Một số I/O/background work có thể dùng thread/process khác.
 
 ### Ví dụ command chậm block command nhanh
 
-```text
-T0: Client A chạy SMEMBERS huge:set 10 triệu members
-T1: Client B chạy GET session:abc
-T2: Client C chạy INCR counter
-
-Redis phải execute xong SMEMBERS trước,
-GET và INCR bị chờ dù bản thân rất nhanh.
+```d2 title="Command nặng làm các command nhỏ phải chờ execute"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis main thread"
+b: "Client B"
+c: "Client C"
+a -> r: "T0: SMEMBERS huge:set — 10 triệu members"
+r."Execute SMEMBERS lâu"
+b -> r: "T1: GET session:abc — chờ"
+c -> r: "T2: INCR counter — chờ"
+r -> a: "Hoàn tất SMEMBERS"
+r -> b: "Sau đó mới execute GET"
+r -> c: "Execute INCR"
 ```
 
 > [!TIP]
@@ -357,19 +357,18 @@ INCR counter
 
 Về logic gồm đọc value, tăng, ghi lại. Nhưng vì chạy trong một command server-side, nó atomic.
 
-```text
-Client A INCR counter
-Client B INCR counter
-
-Không thể xảy ra:
-A read 0
-B read 0
-A write 1
-B write 1
-
-Redis execute tuần tự:
-A: 0 → 1
-B: 1 → 2
+```d2 title="INCR atomic tránh read-modify-write interleaving"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis"
+b: "Client B"
+r."counter=0"
+a -> r: "INCR counter"
+r."A: 0 → 1, không interleave bên trong"
+r -> a: "1"
+b -> r: "INCR counter"
+r."B: 1 → 2"
+r -> b: "2"
 ```
 
 ### Atomic không có nghĩa là transaction database đầy đủ
@@ -391,11 +390,10 @@ Redis có `MULTI/EXEC`, `WATCH` và Lua để xử lý atomic multi-command, nh�
 
 Mỗi Redis database có hai dictionary quan trọng:
 
-```text
-redisDb
-├── dict     : key → value object
-└── expires  : key → expire timestamp
-```
+| Field của redisDb | Ánh xạ |
+| --- | --- |
+| `dict` | key → value object |
+| `expires` | key → expire timestamp |
 
 ### `dict`: dữ liệu chính
 
@@ -518,10 +516,10 @@ Redis là in-memory store, nên memory là tài nguyên quan trọng nhất.
 
 Redis không tự spill dataset xuống disk trong request path. Persistence dùng disk để recover, không phải để query dữ liệu lạnh như database disk-based.
 
-```text
-RAM chứa dataset chính
-Disk chứa RDB/AOF để restart/recover
-```
+| Nơi lưu | Vai trò |
+| --- | --- |
+| RAM | Dataset chính khi Redis chạy |
+| Disk | RDB/AOF để restart hoặc recover |
 
 ### used_memory vs RSS
 
@@ -595,11 +593,18 @@ Redis định kỳ lấy mẫu key có TTL và xóa key đã hết hạn.
 
 Concept:
 
-```text
-Mỗi vòng cron:
-- lấy một số key ngẫu nhiên trong expires dict
-- xóa key hết hạn
-- nếu tỷ lệ expired cao, tiếp tục quét thêm trong giới hạn thời gian
+```d2 title="Active expiration lấy mẫu theo time budget"
+direction: down
+cron: "Vòng cron"
+sample: "Lấy ngẫu nhiên keys\ntrong expires dict"
+delete: "Xóa key hết hạn"
+more: "Tỷ lệ expired cao\nvà còn time budget?" {shape: diamond}
+stop: "Kết thúc chu kỳ"
+cron -> sample
+sample -> delete
+delete -> more
+more -> sample: "Có"
+more -> stop: "Không"
 ```
 
 > [!NOTE]
@@ -624,9 +629,15 @@ Redis có hai cơ chế persistence chính:
 
 `BGSAVE` tạo child process bằng `fork()`:
 
-```text
-Parent Redis process: tiếp tục phục vụ clients
-Child process: ghi snapshot ra disk
+```d2 title="Snapshot child đọc dataset trong lúc parent phục vụ"
+direction: right
+parent: "Parent Redis process"
+serve: "Tiếp tục phục vụ clients"
+child: "Child process"
+disk: "Ghi snapshot ra disk"
+parent -> serve
+parent -> child: "fork / CoW"
+child -> disk
 ```
 
 Nhờ copy-on-write, child thấy memory tại thời điểm fork. Nếu parent ghi dữ liệu sau fork, OS copy page bị sửa.
@@ -660,11 +671,17 @@ AOF rewrite cũng dùng child process để tạo AOF compact. Trong lúc rewrit
 
 Khi master nhận write command:
 
-```text
-Client → Master: SET k v
-Master execute trên keyspace
-Master append command vào replication stream
-Replica nhận stream và apply command
+```d2 title="Write đi vào replication stream sau execution"
+direction: right
+n0: "Client → Master: SET k v"
+n1: "Master execute trên keyspace"
+n2: "Append effects vào replication stream"
+n3: "Replica nhận stream"
+n4: "Replica apply command"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 Replication cũng gắn vào command lifecycle.
@@ -702,10 +719,7 @@ io-threads-do-reads yes
 
 Điểm cực quan trọng:
 
-```text
-I/O threads không làm command execution đa luồng.
-Keyspace mutation vẫn do main thread execute.
-```
+I/O threads không làm command execution đa luồng; keyspace mutation vẫn do main thread execute.
 
 ### Khi nào I/O threads hữu ích?
 

@@ -47,12 +47,17 @@ Vì vậy doc này đi từ trong ra ngoài: String nằm trong memory ra sao (S
 
 String là kiểu dữ liệu cơ bản nhất của Redis: một key trỏ tới một chuỗi byte **binary-safe** dài tối đa **512MB**. “String” ở đây có thể là số, JSON, HTML, token, protobuf, ảnh nhỏ, hoặc bitmap.
 
-```diagram
-key ──▶ redisObject(type=string)
-              │ encoding?
-              ├── int     : value là số nguyên 64-bit → lưu thẳng trong pointer
-              ├── embstr  : ≤ 44 bytes → robj + SDS trong MỘT khối malloc
-              └── raw     : > 44 bytes → robj và SDS cấp phát riêng
+```d2 title="String có encoding int, embstr hoặc raw"
+direction: down
+key: "Key"
+object: "redisObject\ntype=string"
+integer: "int\nInteger 64-bit phù hợp\nLưu value trong pointer"
+emb: "embstr\nString nhỏ phù hợp ngưỡng\nrobj + SDS chung allocation"
+raw: "raw\nrobj và SDS cấp phát riêng"
+key -> object
+object -> integer
+object -> emb
+object -> raw
 ```
 
 > [!NOTE]
@@ -80,14 +85,22 @@ key ──▶ redisObject(type=string)
 
 SDS là lớp “vỏ” mà Redis dùng để biến một mảng byte thô thành String có metadata rõ ràng: biết dài bao nhiêu, còn dư bao nhiêu chỗ, và vẫn chứa được mọi byte. C string chỉ biết kết thúc bằng `\0`, nên muốn biết length phải scan O(N) và không lưu binary an toàn. Redis cần `STRLEN` O(1), `APPEND` nhanh, và value có thể chứa byte bất kỳ. Vì vậy Redis dùng **SDS**:
 
-```diagram
-┌────────────── SDS header ──────────────┐┌──────────── buf ────────────┐
-│ len = 11 │ alloc = 15 │ flags = sdshdr8││ hello\0world │ \0 terminator│
-└────────────────────────────────────────┘└─────────────────────────────┘
-       │            │              │
-       │            │              └─ chọn header 5/8/16/32/64
-       │            └─ capacity đã cấp phát, giúp append không realloc liên tục
-       └─ length thật → STRLEN O(1), binary-safe
+```d2 title="SDS tách metadata khỏi buffer binary-safe"
+sds: "SDS — sơ đồ trường, không theo tỷ lệ byte" {
+  grid-columns: 2
+  header: "SDS header" {
+    grid-columns: 1
+    len: "len=11\nĐộ dài thật, STRLEN O(1)"
+    alloc: "alloc=15\nCapacity đã cấp phát"
+    flags: "flags=sdshdr8\nChọn header 5/8/16/32/64"
+  }
+  buf: "Buffer" {
+    grid-columns: 1
+    data: "hello\\0world\n11 byte gồm NUL ở giữa"
+    spare: "Capacity dư cho append"
+    terminator: "NUL terminator cuối\nKhông dùng để tính len"
+  }
+}
 ```
 
 5 header size:
@@ -110,14 +123,15 @@ Pre-allocation là mẹo “xin dư bộ nhớ một chút” để những lầ
 1. Nếu size mới < 1MB → cấp phát khoảng **gấp đôi** size mới.
 2. Nếu size mới ≥ 1MB → cấp phát thêm **1MB** free space, tránh nhân đôi quá lãng phí.
 
-```diagram
-len=10 alloc=10 + APPEND 5 bytes
-        │
-        ▼
-need=15 < 1MB → alloc≈30
-┌──────────── 15 bytes used ────────────┬──── 15 bytes free ────┐
-│ data                                  │ future append         │
-└───────────────────────────────────────┴───────────────────────┘
+```d2 title="SDS pre-allocation chừa capacity cho APPEND"
+direction: right
+n0: "Ban đầu\nlen=10 / alloc=10"
+n1: "APPEND thêm 5 byte\nneed=15 <1 MB"
+n2: "Ví dụ alloc≈30\n15 byte data + 15 byte free"
+n3: "Append tiếp có thể dùng chỗ trống\nKhông realloc mỗi lần"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Nếu append từng byte 1 triệu lần, Redis không realloc 1 triệu lần. Tổng chi phí copy được trải đều → **O(N) tổng**, tức **O(1) amortized** cho append nhỏ.
@@ -147,14 +161,21 @@ APPEND s "!"         # OBJECT ENCODING s → "raw"
 
 Ngưỡng 44 byte không phải con số ngẫu nhiên; nó đến từ cách Redis cố nhét object nhỏ vào một ô cấp phát vừa đẹp để giảm overhead. Cụ thể, Redis muốn nhét object nhỏ vào allocator class (nhóm kích thước bộ nhớ mà bộ cấp phát dùng để cấp phát/tái sử dụng block) **64 bytes**:
 
-```diagram
-64-byte allocation
-┌──────────────┬───────────────┬───────┬──────────────┐
-│ redisObject  │ SDS hdr nhỏ   │ \0    │ usable value │
-│ ~16 bytes    │ ~3 bytes      │ 1     │ 44 bytes     │
-└──────────────┴───────────────┴───────┴──────────────┘
-64 - 16 - 3 - 1 = 44
+```d2 title="Allocation 64 byte giải thích ngưỡng embstr thường gặp"
+group: "Ví dụ layout 64 byte — không vẽ theo tỷ lệ" {
+  grid-columns: 4
+  n0: "redisObject\n~16 byte"
+  n1: "SDS header nhỏ\n~3 byte"
+  n2: "NUL terminator\n1 byte"
+  n3: "Usable value\n44 byte"
+}
 ```
+
+```text
+64 - 16 - 3 - 1 = 44 byte
+```
+
+Đây là layout minh họa trên nền tảng phù hợp; không coi 44 byte là hợp đồng mọi version/build.
 
 > [!TIP]
 > Token, session id, feature flag value ngắn thường rơi vào `embstr`: ít allocation hơn, free nhanh hơn. Nhưng chỉ cần `APPEND` một ký tự, nó thành `raw` vì embstr không sửa tại chỗ.
@@ -206,10 +227,21 @@ INCR notanumber       # ERR value is not an integer
 
 Redis xử lý lệnh **tuần tự trên event loop** (một lệnh nặng làm chậm client khác — xem [Redis Architecture](./redis-architecture.md) § Event loop):
 
-```diagram
-Client A: INCR counter ─┐
-Client B: INCR counter ─┼─▶ command queue ─▶ [read 5][+1][write 6] ─▶ [read 6][+1][write 7]
-Client C: GET counter  ─┘
+```d2 title="Các INCR thực thi tuần tự trên main thread"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis main thread"
+b: "Client B"
+c: "Client C"
+r."counter ban đầu=5"
+a -> r: "INCR counter"
+r."Read 5 → +1 → write 6\nKhông xen lệnh khác vào giữa INCR"
+r -> a: "6"
+b -> r: "INCR counter"
+r."Read 6 → +1 → write 7"
+r -> b: "7"
+c -> r: "GET counter"
+r -> c: "7 — theo thứ tự xử lý minh họa"
 ```
 
 Không có hai `INCR` chen giữa nhau, nên không có lost update. Sai lầm là kéo phép cộng về client:
@@ -280,12 +312,19 @@ Phân tích lock đầy đủ: [Distributed Lock](./distributed-lock.md).
 
 TTL không nằm trực tiếp trong object String. Redis có dict dữ liệu chính và dict `expires` riêng:
 
-```diagram
-┌──────────── main dict ────────────┐       ┌──────── expires dict ────────┐
-│ "cache:a" ─▶ redisObject          │       │ "cache:a" ─▶ 1783420800000ms │
-│ "counter" ─▶ redisObject          │       │ "sess:x"  ─▶ 1783420900000ms │
-└───────────────────────────────────┘       └──────────────────────────────┘
-        key không TTL → không có entry bên expires
+```d2 title="Key có TTL xuất hiện thêm trong expires dict"
+direction: right
+main: "Main dictionary" {
+  cache: "cache:a → redisObject"
+  counter: "counter → redisObject\nKhông TTL"
+  session: "sess:x → redisObject"
+}
+expires: "Expires dictionary" {
+  cache: "cache:a → 1783420800000 ms"
+  session: "sess:x → 1783420900000 ms"
+}
+main.cache -> expires.cache: "Có TTL"
+main.session -> expires.session: "Có TTL"
 ```
 
 Redis xóa expired key bằng 2 cơ chế:
@@ -514,13 +553,19 @@ Không TTL làm eviction khó dự đoán; đọc [Eviction Policies](./eviction
 | Approx distinct count | HyperLogLog | memory cố định nhỏ | [Bitmaps & HyperLogLog](./bitmaps-hyperloglog.md) |
 | Cache có nguy cơ eviction | String + TTL | phối hợp policy | [Eviction Policies](./eviction-policies.md) |
 
-```diagram
-Bạn có dữ liệu gì?
-├─ Một scalar/token/counter/blob nhỏ? ─────▶ String
-├─ Object nhiều field, update từng field? ─▶ Hash
-├─ Danh sách/queue? ──────────────────────▶ List/Stream
-├─ Cờ true/false theo id? ────────────────▶ Bitmap
-└─ Đếm unique xấp xỉ? ────────────────────▶ HyperLogLog
+```d2 title="Chọn data structure theo kiểu thao tác"
+direction: down
+data: "Bạn có dữ liệu gì?" {shape: diamond}
+s: "String\nScalar / token / counter / blob nhỏ"
+h: "Hash\nObject update từng field"
+l: "List / Stream\nDanh sách / queue / event log"
+b: "Bitmap\nCờ boolean theo integer ID"
+hll: "HyperLogLog\nUnique count xấp xỉ"
+data -> s
+data -> h
+data -> l
+data -> b
+data -> hll
 ```
 
 ### Khi nào KHÔNG nên dùng String
@@ -546,17 +591,15 @@ Bạn có dữ liệu gì?
 
 ## 16. Tóm tắt / Cheat sheet
 
-```diagram
-┌──────────────────── Redis String cheat sheet ─────────────────────┐
-│ Small scalar/token/counter  → int/embstr, rất rẻ                  │
-│ JSON/HTML blob              → OK nếu nhỏ, có TTL, không hot quá   │
-│ Counter                     → INCR/INCRBY, đừng GET+SET           │
-│ Lock/idempotency            → SET NX PX/EX + token                │
-│ Refresh cache               → nhớ KEEPTTL hoặc EX mới             │
-│ Many keys                   → MGET/pipeline, batch vừa phải       │
-│ Huge value                  → tách/nén/chọn data structure khác   │
-└───────────────────────────────────────────────────────────────────┘
-```
+| Nhu cầu | Ghi nhớ |
+| --- | --- |
+| Scalar/token/counter nhỏ | int/embstr khi đủ điều kiện, đo memory thực tế |
+| JSON/HTML blob | Giữ nhỏ, có TTL phù hợp, tránh hot/big key |
+| Counter | Dùng `INCR/INCRBY`, không ghép `GET+SET` |
+| Lock/idempotency | `SET NX PX/EX`, token và contract ownership |
+| Refresh cache | Cân nhắc `KEEPTTL` hoặc TTL mới rõ ràng |
+| Nhiều key | `MGET` / pipeline với batch có giới hạn |
+| Huge value | Tách, nén hoặc chọn cấu trúc khác |
 
 3 nguyên tắc nhớ lâu:
 

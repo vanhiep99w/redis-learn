@@ -87,14 +87,13 @@ Ops phải cài `.so`, cấu hình `loadmodule`, đồng bộ binary trên nodes
 
 Redis 8 hợp nhất các capability trước đây thuộc Redis Stack vào Redis Open Source distribution. JSON, Search, Time Series và probabilistic structures được cung cấp như feature tích hợp của unified package; người dùng không còn phải tự ghép nhiều module package cho distribution chuẩn.
 
-```text
-Redis 7.x era                 Redis 8+
-Redis core                    Redis unified distribution
- + RedisJSON                  + JSON
- + RediSearch       →         + Search/vector
- + RedisTimeSeries            + Time Series
- + RedisBloom                 + Probabilistic
-```
+| Redis 7.x era | Redis 8+ unified distribution |
+| --- | --- |
+| Redis core | Redis core |
+| RedisJSON | JSON |
+| RediSearch | Search / vector |
+| RedisTimeSeries | Time Series |
+| RedisBloom | Probabilistic capabilities |
 
 Tên command vẫn giữ prefix lịch sử (`JSON.*`, `FT.*`, `TS.*`, `BF.*`), nên tài liệu và code vẫn thường gọi chúng là “modules”.
 
@@ -185,14 +184,12 @@ Trả name/version/API info của loaded modules. Redis 8 unified features có t
 
 Application nên kiểm tra:
 
-```text
-Redis major/minor trong supported range
-required commands tồn tại
-ACL cho command/key/index
-index schema/version expected
-cluster topology/feature support
-client codec response tương thích
-```
+- Redis major/minor nằm trong supported range.
+- Required commands tồn tại.
+- ACL cho phép đúng command/key/index.
+- Index schema/version khớp kỳ vọng.
+- Topology Cluster hỗ trợ feature cần dùng.
+- Client codec hiểu response của version đang chạy.
 
 Fail fast với message rõ thay vì traffic đầu tiên mới gặp `ERR unknown command`.
 
@@ -797,12 +794,12 @@ Cache GET p99 1 ms và vector query 100 ms có resource profile khác. Tách clu
 
 Redis 8 ACL categories bao phủ integrated JSON, Time Series, vector và probabilistic commands; breaking behavior có thể khác Redis 7/module era. Sau upgrade, test least-privilege users:
 
-```text
-app-reader: JSON.GET, FT.SEARCH, TS.RANGE
-app-writer: selected JSON.SET/TS.ADD key patterns
-index-admin: FT.CREATE/ALTER/DROPINDEX
-server-admin: module/config lifecycle
-```
+| Role | Quyền cần thiết |
+| --- | --- |
+| app-reader | `JSON.GET`, `FT.SEARCH`, `TS.RANGE` theo scope |
+| app-writer | Một số `JSON.SET` / `TS.ADD` trên key patterns cho phép |
+| index-admin | `FT.CREATE` / `FT.ALTER` / `FT.DROPINDEX` |
+| server-admin | Lifecycle module/config, không cấp cho app thường |
 
 Không cho app runtime quyền `MODULE LOAD`, `FUNCTION LOAD`, index drop hoặc arbitrary admin commands.
 
@@ -897,30 +894,40 @@ Deployment idempotent: inspect existing schema/version, create new version, swit
 
 ### 17.3. Migrate String JSON sang Redis JSON
 
-```text
-1. Define new key namespace json:product:v2:*
-2. Dual-write old String + new JSON
-3. Backfill theo batches có checkpoint
-4. Validate count/sample/checksum
-5. Build Search index v2
-6. Shadow queries và compare
-7. Switch reads
-8. Stop old writes
-9. Retain old keys rollback window rồi expire
+```d2 title="Migrate String JSON sang Redis JSON theo giai đoạn"
+direction: right
+n0: "Namespace mới\njson:product:v2:*"
+n1: "Dual-write String cũ và JSON mới"
+n2: "Backfill batches có checkpoint"
+n3: "Validate count / sample / checksum"
+n4: "Build Search index v2"
+n5: "Shadow queries và compare"
+n6: "Switch reads sang v2"
+n7: "Stop old writes"
+n8: "Giữ key cũ trong rollback window\nSau đó expire"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
+n4 -> n5
+n5 -> n6
+n6 -> n7
+n7 -> n8
 ```
 
 Không rewrite hàng triệu keys bằng one giant Lua/transaction.
 
 ### 17.4. Build index blue/green
 
-```text
-idx:products:v2 serving
-create idx:products:v3
-backfill/index documents
-validate golden queries
-FT.ALIASUPDATE idx:products idx:products:v3
-observe
-keep v2 rollback
+```d2 mode=steps title="Blue/green Search index giữ đường rollback"
+serving: "Alias idx:products → v2"
+new: "Index v3 — chưa phục vụ"
+steps: {
+  create: { new: "Create idx:products:v3\nBackfill / index documents" }
+  validate: { new: "Validate golden queries" }
+  switch: { serving: "FT.ALIASUPDATE\nidx:products → idx:products:v3"; new: "v3 serving" }
+  observe: { serving: "Observe v3\nGiữ v2 để rollback" }
+}
 ```
 
 Exact alias commands/options theo version. Capacity peak chứa cả v2 + v3 indexes.

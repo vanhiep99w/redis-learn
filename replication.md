@@ -232,12 +232,15 @@ Nếu nhiều replica cùng yêu cầu full sync gần nhau, master có thể d�
 
 Kịch bản:
 
-```text
-T0: Master offset = 1000, Replica đã nhận tới 1000
-T1: Network đứt
-T2: Master tiếp tục nhận writes, offset tăng tới 1800
-T3: Replica reconnect, báo: tôi có replid X, offset 1000
-T4: Nếu master còn giữ stream 1001..1800 trong backlog → gửi phần thiếu
+```d2 title="Partial sync tiếp tục stream còn nằm trong backlog"
+shape: sequence_diagram
+r: "Replica"
+m: "Master"
+m."T0: offset=1000\nReplica đã nhận tới 1000"
+r."T1: network đứt"
+m."T2: tiếp tục writes, offset=1800"
+r -> m: "T3: PSYNC replid X, offset 1000"
+m -> r: "T4: gửi 1001…1800 nếu còn backlog\nvà cùng replication history"
 ```
 
 Partial sync nhanh hơn nhiều vì chỉ truyền delta.
@@ -291,16 +294,15 @@ Offset vẫn tăng ngay cả khi không có replica kết nối. Điều này qu
 
 Replication backlog là một buffer vòng (circular buffer) trên master, lưu một phần replication stream gần nhất để phục vụ partial sync.
 
-```text
-Master replication stream offset:
-
-... 900 1000 1100 1200 1300 1400 1500
-              └──────── backlog ────────┘
-
-Replica disconnect tại offset 1050
-Replica reconnect khi master offset 1500
-Nếu backlog còn từ <=1051 → partial sync OK
-Nếu backlog chỉ còn từ 1200   → full sync
+```d2 title="Backlog quyết định partial sync hay full sync"
+direction: down
+replica: "Replica disconnect ở offset 1050\nReconnect khi master ở 1500"
+has: "Còn stream từ 1051\nvà history phù hợp?" {shape: diamond}
+partial: "Partial sync\nGửi delta còn thiếu"
+full: "Full sync\nVí dụ backlog chỉ còn từ 1200"
+replica -> has
+has -> partial: "Có"
+has -> full: "Không"
 ```
 
 Config quan trọng:
@@ -344,19 +346,25 @@ Khi một replica được promote thành master sau failover, nó tạo replica
 
 Ý nghĩa:
 
-```text
-Trước failover:
-Master A replid = OLD, offset = 10000
-Replica B theo A tới offset 9900
-Replica C theo A tới offset 9700
-
-Sau failover:
-B được promote thành master
-B có replid mới = NEW
-B vẫn nhớ replid cũ = OLD tới offset 9900
-
-C kết nối B và nói: tôi có OLD offset 9700
-B có thể gửi delta 9701..9900 nếu còn backlog
+```d2 mode=steps title="Secondary replication ID giúp replica nối tiếp history cũ"
+direction: right
+a: "A: master\nreplid OLD / offset 10000"
+b: "B: replica\noffset 9900"
+c: "C: replica\noffset 9700"
+a -> b: Replication
+a -> c: Replication
+steps: {
+  promote: {
+    (a -> b)[0]: null
+    (a -> c)[0]: null
+    a: "A lỗi / bị thay thế"
+    b: "B: master\nreplid NEW\nNhớ OLD tới offset 9900"
+  }
+  reconnect: {
+    c -> b: "PSYNC OLD offset 9700"
+    b -> c: "Có thể gửi delta 9701…9900\nNếu còn backlog và history phù hợp"
+  }
+}
 ```
 
 Nhờ vậy failover không luôn kéo theo full sync hàng loạt.
@@ -594,14 +602,19 @@ Xem chi tiết:
 
 Đây là failure mode cực nguy hiểm:
 
-```text
-1. Master A tắt persistence, có dữ liệu trong memory.
-2. Replica B và C đang replicate từ A.
-3. A crash.
-4. Supervisor/systemd tự restart A.
-5. Vì không persistence, A restart với dataset rỗng.
-6. B và C reconnect tới A và sync dataset rỗng.
-7. Toàn bộ dữ liệu trên replica bị xóa theo master.
+```d2 title="Auto restart primary rỗng có thể xóa dữ liệu trên replica"
+direction: right
+n0: "A tắt persistence\nB/C replicate từ A"
+n1: "A crash"
+n2: "Supervisor tự restart A"
+n3: "A load dataset rỗng"
+n4: "B/C reconnect và full sync từ A"
+n5: "Replica cũng thành rỗng\nMất toàn bộ bản sao trong topology này"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
+n4 -> n5
 ```
 
 > [!IMPORTANT]
@@ -639,11 +652,14 @@ Lý do: nếu master và replica tự expire theo clock riêng, clock lệch có
 
 Luồng:
 
-```text
-Master phát hiện key session:1 hết hạn
-Master xóa key
-Master gửi DEL session:1 sang replica
-Replica apply DEL
+```d2 title="Primary truyền DEL cho key bị expire"
+shape: sequence_diagram
+m: "Master"
+r: "Replica"
+m."Phát hiện session:1 hết hạn"
+m."Xóa key"
+m -> r: "DEL session:1"
+r."Apply DEL"
 ```
 
 Replica có thể có key đã “logically expired” nhưng chưa nhận `DEL`; khi đọc, Redis có cơ chế tránh trả dữ liệu đã quá TTL trong nhiều tình huống read.
@@ -1148,11 +1164,11 @@ Replication đơn thuần chỉ là nền tảng.
 
 Không route toàn bộ read sang replica một cách mù quáng. Phân loại read:
 
-```text
-Critical/read-after-write  → master
-Stale-tolerant/cache read  → replica
-Heavy reporting            → dedicated replica
-```
+| Read requirement | Route |
+| --- | --- |
+| Critical / read-after-write | Master |
+| Stale-tolerant / cache | Replica |
+| Heavy reporting | Replica chuyên dụng |
 
 ### 4. Tăng backlog theo write rate thực tế
 

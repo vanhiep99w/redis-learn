@@ -14,6 +14,7 @@ import { Step, Steps } from 'fumadocs-ui/components/steps';
 import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
 import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { File, Folder, Files } from 'fumadocs-ui/components/files';
 import type { Metadata } from 'next';
 
 const mdxComponents = {
@@ -34,6 +35,9 @@ const mdxComponents = {
   Accordion,
   Accordions,
   TypeTable,
+  File,
+  Folder,
+  Files,
 };
 
 export default async function Page({

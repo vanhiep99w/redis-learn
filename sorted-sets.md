@@ -48,15 +48,17 @@ ZRANGE lb:s27 0 99 REV WITHSCORES    # top 100
 
 Sorted Set (ZSet) là collection gồm **member unique** giống [Set](./sets.md), nhưng mỗi member có thêm một **score kiểu double**. Redis luôn sắp xếp theo cặp `(score, member)`:
 
-```diagram
-key: leaderboard
-
-score thấp                                                score cao
-   150              420              990              1200
- "dave"          "carol"          "bob"            "alice"
-   │                │                │                │
-   └── ZRANGE asc   └── ZRANGEBYSCORE └── ZRANK       └── ZRANGE REV top
+```d2 title="Leaderboard giữ thứ tự tăng theo score"
+board: "leaderboard — score tăng từ trái sang phải" {
+  grid-columns: 4
+  dave: "dave\nscore=150"
+  carol: "carol\nscore=420"
+  bob: "bob\nscore=990"
+  alice: "alice\nscore=1200"
+}
 ```
+
+`ZRANGE` duyệt tăng dần; `ZRANGE ... REV` lấy từ score cao; `ZRANGEBYSCORE` lọc theo score; `ZRANK` trả rank.
 
 | Use case | Score thường là gì? | Lệnh trung tâm |
 |----------|---------------------|----------------|
@@ -78,21 +80,17 @@ So với [Streams](./streams.md), Sorted Set không có consumer group, ack, pen
 
 Để hiểu vì sao ZSet vừa lấy điểm rất nhanh vừa trả top/rank nhanh, hãy nhìn nó như một cuốn danh bạ có hai mục lục: một mục lục theo tên, một mục lục theo thứ tự điểm. Mục lục theo thứ tự đó là `skiplist` — danh sách nhiều tầng cho phép nhảy cóc qua nhiều node. Một ZSet lớn trong Redis dùng **hai cấu trúc dữ liệu trỏ tới cùng member**:
 
-```diagram
-                 ┌──────────────────────────────┐
-                 │          Sorted Set          │
-                 └──────────────┬───────────────┘
-                                │
-        ┌───────────────────────┴───────────────────────┐
-        │                                               │
-┌───────▼────────┐                              ┌────────▼─────────┐
-│ dict/hashtable │                              │ skiplist         │
-│ member → score │                              │ ordered by score │
-└───────┬────────┘                              └────────┬─────────┘
-        │                                                │
-        ├─ ZSCORE player:42       O(1)                   ├─ ZRANGE top 10        O(log N + M)
-        ├─ tồn tại member?        O(1)                   ├─ ZRANK/ZREVRANK       O(log N)
-        └─ update score cũ?       O(1)                   └─ ZRANGEBYSCORE        O(log N + M)
+```d2 title="ZSet lớn kết hợp dict và skiplist"
+direction: down
+z: "Sorted Set\nEncoding skiplist"
+dict: "dict / hashtable\nmember → score"
+skip: "Skiplist\nOrdered by score"
+lookup: "ZSCORE / membership\nLookup kỳ vọng O(1)"
+range: "ZRANGE / ZRANGEBYSCORE\nO(log N + M)\nZRANK / ZREVRANK: O(log N)"
+z -> dict
+z -> skip
+dict -> lookup
+skip -> range
 ```
 
 Nếu chỉ có `dict`, Redis biết điểm của `player:42` rất nhanh nhưng không biết top 10 là ai nếu không sort toàn bộ. Nếu chỉ có `skiplist`, Redis lấy top 10/range tốt nhưng mỗi lần `ZSCORE player:42` phải dò theo thứ tự.
@@ -104,20 +102,17 @@ Nếu chỉ có `dict`, Redis biết điểm của `player:42` rất nhanh nhưn
 
 Khi score thay đổi, Redis không chỉ sửa một con số; nó phải tháo member khỏi vị trí cũ trong thứ tự rồi đặt lại vào vị trí mới. Phần `span` (số node mà một đường tắt nhảy qua) cũng được cập nhật để rank vẫn tính nhanh.
 
-```diagram
-ZADD lb 1300 player:42
-
-1) dict lookup member
-   player:42 → score cũ = 1200                  O(1)
-
-2) skiplist delete node cũ (1200, player:42)
-   tìm đường đi qua nhiều tầng                   O(log N)
-
-3) skiplist insert node mới (1300, player:42)
-   level ngẫu nhiên + cập nhật span              O(log N)
-
-4) dict update score
-   player:42 → 1300                              O(1)
+```d2 title="ZADD cập nhật score của member đã có"
+direction: right
+n0: "ZADD lb 1300 player:42"
+n1: "1. Dict lookup\nScore cũ=1200 — O(1) kỳ vọng"
+n2: "2. Skiplist xóa node cũ\n(1200, player:42) — O(log N)"
+n3: "3. Insert hoặc điều chỉnh node\nScore 1300 — O(log N) tổng quát"
+n4: "4. Dict giữ score mới\nplayer:42 → 1300"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 Vì vậy `ZADD`/`ZINCRBY` là `O(log N)` cho mỗi member: phần đắt nằm ở việc **đưa node về đúng vị trí trong skiplist**.
@@ -130,15 +125,28 @@ Vì vậy `ZADD`/`ZINCRBY` là `O(log N)` cho mỗi member: phần đắt nằm 
 
 Skiplist là cách Redis tạo “đường tắt” trên một danh sách đã sắp xếp, để tìm kiếm không phải đi từng phần tử từ đầu. Nó gồm nhiều level: level thấp nhất chứa mọi node; level cao hơn chỉ chứa một phần node được chọn ngẫu nhiên.
 
-```diagram
-Tìm score = 990
-
-L4: head ────────────────────────────────────────────────▶ NULL
-L3: head ─────────────────────▶ 990:bob ─────────────────▶ NULL
-L2: head ─────────▶ 420:carol ─▶ 990:bob ────────────────▶ NULL
-L1: head ─▶150:dave─▶420:carol─▶990:bob─▶1200:alice──────▶ NULL
-        đi ngang tới khi node kế tiếp vượt target, rồi rơi xuống 1 tầng
+```d2 title="Skiplist: đi ngang theo level rồi đi xuống"
+direction: right
+head: "head\nBắt đầu level cao nhất"
+dave: "150:dave\nL1"
+carol: "420:carol\nL1, L2"
+bob: "990:bob\nL1, L2, L3"
+alice: "1200:alice\nL1"
+end: NULL
+head -> end: L4
+head -> bob: L3
+bob -> end: L3
+head -> carol: L2
+carol -> bob: L2
+bob -> end: L2
+head -> dave: L1
+dave -> carol: L1
+carol -> bob: L1
+bob -> alice: L1
+alice -> end: L1
 ```
+
+Khi tìm score 990, đi ngang khi node kế tiếp chưa vượt target; nếu cần thì xuống level thấp hơn. Các node trong hình ghi những level mà chúng tham gia.
 
 Redis không cần rotate/rebalance như tree. Tầng ngẫu nhiên quan trọng vì nó phân bố các đường tắt đủ đều mà không cần thao tác cân bằng phức tạp. Khi insert node mới, Redis tung “đồng xu lệch”:
 
@@ -166,15 +174,15 @@ Với `p = 0.25`, trung bình:
 
 `span` là “đồng hồ đo quãng đường” của từng đường tắt: không chỉ biết nhảy tới đâu, Redis còn biết cú nhảy đó vượt qua bao nhiêu node. Nếu skiplist chỉ có pointer, muốn biết rank của `player:42` Redis vẫn phải đếm bao nhiêu node đứng trước. Vì vậy mỗi forward pointer trong skiplist node lưu thêm **span**: con trỏ đó nhảy qua bao nhiêu node ở level dưới.
 
-```diagram
-Tính rank của score 990
-
-L3: head ───────────────(span=3)──────────────▶ 990:bob
-       rank += 3
-
-L2/L1: nếu cần đi thêm, cộng tiếp span trên đường tìm kiếm
-
-Kết quả: rank ascending của bob = 2 (0-based)
+```d2 title="Span cộng số phần tử bỏ qua để tính rank"
+direction: right
+head: "Head\nrank accumulator=0"
+bob: "990:bob\nAccumulator=3"
+rank: "ZRANK ascending=2\n0-based: accumulator − 1"
+more: "Nếu đi tiếp ở L2/L1\nCộng thêm span từng cạnh"
+head -> bob: "L3: span=3"
+bob -> rank
+bob -> more: "Chỉ khi còn cần đi tiếp"
 ```
 
 Nhờ span, trên đường tìm kiếm Redis cộng dồn số node đã vượt qua, nên `ZRANK`/`ZREVRANK` là `O(log N)`, không phải `O(N)`. Đây là chi tiết làm leaderboard “rank của tôi” thật sự nhanh.
@@ -202,12 +210,23 @@ Không phải ZSet nào cũng dùng skiplist ngay từ đầu. ZSet nhỏ đư�
 | `listpack` | `zset-max-listpack-entries 128` và `zset-max-listpack-value 64` bytes | Tiết kiệm memory; thao tác `O(N)` nhưng N nhỏ |
 | `skiplist` + `dict` | Vượt một trong hai ngưỡng trên | Nhanh cho lookup/range/rank; tốn memory hơn |
 
-```diagram
-listpack nhỏ:
-[member:"a"][score:1][member:"b"][score:2][member:"c"][score:3]
-
-Khi entries > 128 hoặc member dài > 64 bytes:
-convert one-way → dict + skiplist
+```d2 title="ZSet nhỏ dùng listpack, lớn thì chuyển encoding"
+direction: down
+pack: "Listpack nhỏ — member/score xen kẽ" {
+  grid-columns: 6
+  a: "member: a"
+  sa: "score: 1"
+  b: "member: b"
+  sb: "score: 2"
+  c: "member: c"
+  sc: "score: 3"
+}
+check: "Vượt ngưỡng cấu hình?\nVí dụ entries >128\nhoặc member dài >64 byte" {shape: diamond}
+large: "Chuyển một chiều\ndict + skiplist"
+small: "Giữ listpack"
+pack -> check
+check -> large: Có
+check -> small: Không
 ```
 
 > [!WARNING]
@@ -563,12 +582,15 @@ ZADD delayed:webhook 1783400060 '{"event":"invoice.paid","attempt":2}'
 
 Kiến trúc phổ biến:
 
-```diagram
-Producer ──ZADD due_time──▶ ZSet delayed
-                              │
-                              │ Lua poll due jobs
-                              ▼
-                         List/Stream ready queue ──▶ Workers
+```d2 title="Delayed scheduler chuyển job đến hạn vào ready queue"
+direction: right
+producer: "Producer"
+delay: "ZSet delayed\nscore=due_time"
+ready: "List / Stream ready queue"
+workers: "Workers"
+producer -> delay: "ZADD due_time"
+delay -> ready: "Lua poll due jobs"
+ready -> workers
 ```
 
 ZSet làm “phòng chờ theo thời gian”, còn List/Stream làm queue xử lý. Nếu cần consumer group/retry/ack mạnh, chuyển job due sang [Streams](./streams.md).
@@ -577,19 +599,17 @@ ZSet làm “phòng chờ theo thời gian”, còn List/Stream làm queue xử 
 
 Bài toán: 100 request/60s trượt thật. Fixed window có thể cho burst 200 request quanh ranh giới phút; sliding log bằng ZSet không bị lỗi đó.
 
-```diagram
-Window 60s
-
-now-60s                                                now
-   │-----------------------------------------------------│
-      req req       req        req             req
-      score=timestamp ms, member=req-id unique
-
-Mỗi request:
-1) xóa req cũ hơn now-60s
-2) add req hiện tại
-3) count ZCARD
-4) nếu count > limit → reject 429
+```d2 title="Sliding window log kiểm tra request trong 60 giây"
+direction: right
+n0: "ZSet trong window 60 giây\nscore=timestamp ms\nmember=req-id unique"
+n1: "1. Xóa entry cũ hơn now−60s"
+n2: "2. Add request hiện tại"
+n3: "3. Đếm ZCARD"
+n4: "4. Count > limit → 429\nCác bước phải atomic"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 Trade-off: chính xác hơn nhưng memory tăng theo số request còn trong cửa sổ. Đừng dùng cho mọi endpoint nếu fixed/sliding counter đã đủ.

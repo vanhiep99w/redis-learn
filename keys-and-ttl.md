@@ -457,9 +457,15 @@ Active expire dọn key “mồ côi” không ai truy cập. Chu kỳ ~10Hz + t
 
 ### Hệ quả thực tế
 
-```text
-T0:          TTL logic hết hạn (GET đã trả nil nếu lazy hit)
-T0 + Δ:      active expire mới xóa key idle → used_memory mới giảm
+```d2 title="TTL deadline và thời điểm thu hồi memory không nhất thiết trùng nhau"
+direction: right
+n0: "T0: TTL logic đã hết hạn"
+n1: "GET sẽ trả nil nếu truy cập\nLazy expire có thể xóa ngay"
+n2: "Nếu key vẫn idle\nT0 + Δ: active expire mới xóa"
+n3: "Memory của key idle\nChỉ được thu hồi khi xóa thực sự"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Với workload nhiều key TTL ngắn, active expire tốn CPU trên main thread. Monitor `expired_keys`, latency, và xem [Slow Log & Latency](./slow-log-latency.md).

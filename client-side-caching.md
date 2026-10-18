@@ -37,13 +37,10 @@ Một `GET` Redis có thể dưới 1 ms, nhưng application gọi cùng hot key
 
 Lưu bản sao trong RAM application giảm latency xuống memory access và giảm tải Redis:
 
-```text
-Không local cache
-10 app pods × 20.000 GET/s → Redis nhận 200.000 GET/s
-
-Local hit ratio 90%
-10 app pods × 2.000 miss/s → Redis nhận 20.000 GET/s
-```
+| Trường hợp minh họa | Redis read load |
+| --- | --- |
+| Không L1: 10 pods ×20.000 GET/s | 200.000 GET/s |
+| L1 hit ratio 90%: 10 pods ×2.000 miss/s | 20.000 GET/s |
 
 Vấn đề khó là invalidation: key `user:42` đổi trên Redis nhưng pod vẫn giữ value cũ. Redis 6+ cung cấp **server-assisted client-side caching**, gọi là **Client Tracking**, để Redis gửi invalidation chỉ đến clients có khả năng cache key đó hoặc clients theo dõi prefix.
 
@@ -139,12 +136,14 @@ Sau key thay đổi, tracking relation bị loại. Client phải đọc lại k
 
 RESP3 hỗ trợ push messages multiplex trên cùng connection với normal command replies:
 
-```text
-Connection
-  client → GET foo
-  server → reply "bar"
-  server → push invalidate [foo]
-  client → GET baz
+```d2 title="RESP3 cho phép reply và invalidation push cùng connection"
+shape: sequence_diagram
+c: "Client"
+r: "Redis"
+c -> r: "GET foo"
+r -> c: "Reply: bar"
+r -> c: "Push: invalidate [foo]"
+c -> r: "GET baz"
 ```
 
 Bật protocol/tracking:
@@ -222,10 +221,15 @@ Mỗi D connection phải bật tracking với đúng current ID của I. Nếu 
 
 Connection ID đổi sau reconnect:
 
-```text
-I cũ ID=1234 chết
-I mới ID=5678
-D1/D2 vẫn REDIRECT 1234 → invalidations bị broken
+```d2 title="Reconnect invalidation cần cấu hình lại REDIRECT"
+direction: right
+data: "Data connections D1/D2"
+dead: "I cũ: client ID=1234\nĐã chết"
+new: "I mới: client ID=5678"
+broken: "Nếu không đổi REDIRECT\nInvalidations bị broken"
+data -> dead: "Vẫn REDIRECT 1234 — sai"
+dead -> broken
+data -> new: "Cần cấu hình lại REDIRECT 5678"
 ```
 
 Recovery an toàn:
@@ -340,10 +344,14 @@ CLIENT TRACKING ON NOLOOP
 
 Hữu ích khi write-through local cache:
 
-```text
-client SET product:42 v2
-client update local product:42 = v2
-không muốn nhận invalidate ngay cho write của chính mình
+```d2 title="NOLOOP tránh invalidation từ write trên chính connection đó"
+shape: sequence_diagram
+c: "Client connection với NOLOOP"
+r: "Redis"
+l1: "Local cache"
+c -> r: "SET product:42 v2"
+c -> l1: "Cập nhật local product:42 =v2"
+r."Không gửi lại invalidation cho write\ntrên chính connection này"
 ```
 
 ### 8.1. Cạm bẫy
@@ -364,24 +372,40 @@ Không update local cache trước khi Redis write chắc chắn thành công. N
 
 Two-connection race:
 
-```text
-[D] gửi GET foo
-[I] nhận invalidate foo do writer đổi
-[D] nhận response "old-bar" đến muộn
-application cache old-bar → stale vô hạn nếu không có event tiếp
+```d2 title="Race: invalidation đến trước GET response cũ"
+shape: sequence_diagram
+d: "Data connection D"
+r: "Redis"
+i: "Invalidation connection I"
+cache: "Application L1"
+d -> r: "GET foo"
+r -> i: "Writer đổi foo → invalidate foo"
+i -> cache: "Xóa foo"
+r -> d: "Response old-bar đến muộn"
+d -> cache: "Cache old-bar nếu thiếu generation guard"
+cache."Stale có thể kéo dài nếu không có event tiếp"
 ```
 
 ### 9.1. Placeholder/generation solution
 
 Trước khi gửi GET, đặt local entry state `LOADING` với generation/token:
 
-```text
-1. local foo = LOADING(gen=17)
-2. gửi GET foo
-3. invalidation đến → delete/increment generation
-4. GET response về
-5. chỉ cache nếu LOADING(gen=17) vẫn tồn tại
-6. nếu entry đã bị invalidation → trả response cho caller tùy policy nhưng không cache, hoặc retry
+```d2 title="Generation guard chặn populate từ response cũ"
+direction: down
+mark: "1. foo = LOADING(gen=17)"
+get: "2. Gửi GET foo"
+invalid: "3. Invalidation có thể xóa entry\nhoặc tăng generation"
+response: "4. GET response về"
+check: "LOADING(gen=17)\nvẫn tồn tại?" {shape: diamond}
+store: "5. Cache response"
+reject: "6. Không cache response\nTrả caller hoặc retry theo policy"
+mark -> get
+get -> response
+get -> invalid: "Trong lúc chờ"
+invalid -> response
+response -> check
+check -> store: "Có"
+check -> reject: "Không"
 ```
 
 Pseudo-code:
@@ -411,9 +435,17 @@ Ordering trên một stream tránh race hai connection cụ thể vì reply/push
 
 Nếu mất invalidation connection, application không biết keys nào đổi trong gap. Rule an toàn:
 
-```text
-invalidation connection unhealthy → clear toàn local cache → bypass cache
-reconnected + tracking configured → cho phép populate lại
+```d2 title="Mất tracking thì clear và bypass L1"
+direction: right
+n0: "Invalidation connection unhealthy"
+n1: "Clear toàn local cache"
+n2: "Bypass L1, đọc Redis"
+n3: "Reconnect và cấu hình lại tracking"
+n4: "Cho phép populate L1 trở lại"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 ### 10.1. Không giữ stale “để availability” mà không giới hạn
@@ -496,10 +528,17 @@ Không bật tracking trên một connection rồi nghĩ toàn pool được tra
 
 Mỗi key route đến primary node riêng; tracking/invalidation connection management là per node/topology. Client cluster-aware cần:
 
-```text
-Shard A data connections → invalidation connection IA
-Shard B data connections → invalidation connection IB
-Shard C data connections → invalidation connection IC
+```d2 title="Cluster tracking cần invalidation connection theo shard"
+direction: right
+a: "Shard A data connections"
+b: "Shard B data connections"
+c: "Shard C data connections"
+ia: "Invalidation IA"
+ib: "Invalidation IB"
+ic: "Invalidation IC"
+a -> ia
+b -> ib
+c -> ic
 ```
 
 Hoặc RESP3 connections tự nhận push theo library support. Khi reshard/failover/node add, flush affected/all L1 và rebuild tracking.

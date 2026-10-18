@@ -218,11 +218,15 @@ Bật mọi event tăng CPU, Pub/Sub traffic và nguy cơ lộ key names. Princi
 
 Đừng nhầm `expire` với `expired`:
 
-```text
-EXPIRE key 60
-→ event "expire" lúc đặt TTL
-... sau ít nhất khoảng 60 giây, khi Redis xóa key ...
-→ event "expired"
+```d2 title="expire và expired là hai thời điểm khác nhau"
+shape: sequence_diagram
+a: "Application"
+r: "Redis"
+s: "Subscriber"
+a -> r: "EXPIRE key 60"
+r -> s: "Event expire lúc đặt TTL"
+r."Sau ít nhất khoảng 60s\nKhi Redis thực sự xóa key"
+r -> s: "Event expired"
 ```
 
 Nếu `EXPIRE key -1` hoặc timestamp đã qua, Redis xóa ngay và tạo `del`, không phải `expired` theo semantics command.
@@ -244,10 +248,15 @@ Variadic command thường phát một event cho command, không một event cho
 
 Nhiều operations xóa key khi phần tử cuối bị loại:
 
-```text
-LPOP list có 1 item
-→ lpop
-→ del
+```d2 title="Collection rỗng có thể phát event rồi xóa key"
+direction: right
+n0: "LPOP trên List có 1 item"
+n1: "Event lpop"
+n2: "List trở thành rỗng"
+n3: "Redis xóa key → event del"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Consumer “xóa local cache khi del” phải chấp nhận event trước đó. Không giả một command = một notification.
@@ -296,9 +305,15 @@ Thiết kế tốt hơn:
 
 Có thể dùng để wake cleanup nhanh, nhưng thêm reconciliation sweep:
 
-```text
-notification → attempt cleanup idempotent
-periodic scanner → tìm records quá deadline chưa cleanup
+```d2 title="Expired notification là tín hiệu bổ trợ, scanner là đường đối soát"
+direction: right
+notification: "Expired notification"
+scanner: "Periodic scanner"
+find: "Tìm record quá deadline\nchưa cleanup"
+cleanup: "Cleanup idempotent"
+notification -> cleanup: "Attempt sớm"
+scanner -> find
+find -> cleanup: "Bù notification bị mất"
 ```
 
 Correctness nằm ở source state + idempotent conditional transition, không nằm ở việc event chắc chắn đến.
@@ -333,11 +348,15 @@ Flag `m` có thể phát event khi truy cập key không tồn tại. Trên cach
 
 Keyspace notifications dùng [Pub/Sub](./pub-sub.md), tức at-most-once/fire-and-forget:
 
-```text
-subscriber connected → nhận e1
-network disconnect
-Redis phát e2, e3 → mất
-subscriber reconnect → chỉ nhận e4 trở đi
+```d2 title="Pub/Sub reconnect không replay notification bị mất"
+shape: sequence_diagram
+r: "Redis"
+s: "Subscriber"
+r -> s: "Connected: nhận e1"
+s."Network disconnect"
+r."Phát e2, e3\nSubscriber này không nhận được"
+s -> r: "Reconnect và subscribe"
+r -> s: "Chỉ nhận e4 trở đi"
 ```
 
 Không có:
@@ -359,10 +378,16 @@ Semantics at-most-once từ Redis không có nghĩa application tuyệt đối k
 
 ### 8.3. Đọc value sau event có race
 
-```text
-SET key v1 → event set
-SET key v2 → event set
-subscriber xử lý event đầu rồi GET → thấy v2
+```d2 title="GET sau notification có thể thấy version mới hơn"
+shape: sequence_diagram
+w: "Writer"
+r: "Redis"
+s: "Subscriber"
+w -> r: "SET key v1"
+r -> s: "Event set — không phải value snapshot"
+w -> r: "SET key v2"
+s -> r: "Xử lý event đầu rồi GET key"
+r -> s: "v2"
 ```
 
 Notification là “key đã thay đổi”, không phải event sourcing delta. Pattern tốt là invalidate/reload latest state, không cố reconstruct mọi intermediate value.
@@ -539,12 +564,17 @@ readiness.set('keyevents', true);
 
 Cần discovery loop:
 
-```text
-refresh primaries
-→ connect node mới + subscribe
-→ mark ready khi mọi node covered
-→ remove stale connection sau overlap ngắn
-→ on disconnect, mark coverage degraded + reconcile
+```d2 title="Subscriber manager reconcile các primary trong Cluster"
+direction: right
+n0: "Refresh danh sách primaries"
+n1: "Connect node mới và subscribe"
+n2: "Mark ready khi mọi node covered"
+n3: "Remove stale connection\nsau overlap ngắn"
+n4: "Disconnect → mark degraded\nvà reconcile lại"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 Client library có thể không tự subscribe keyevents trên mọi shard chỉ vì dùng cluster endpoint; integration test topology thật.

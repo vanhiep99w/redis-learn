@@ -178,13 +178,11 @@ HASH_SLOT = CRC16(key) mod 16384
 
 Mỗi key thuộc đúng một slot. Mỗi slot thuộc đúng một master trong trạng thái ổn định.
 
-```text
-Toàn bộ keyspace: 0 ... 16383
-
-Master A: slots 0-5460
-Master B: slots 5461-10922
-Master C: slots 10923-16383
-```
+| Keyspace | Owner minh họa |
+| --- | --- |
+| Slots 0–5460 | Master A |
+| Slots 5461–10922 | Master B |
+| Slots 10923–16383 | Master C |
 
 Khi client chạy:
 
@@ -207,14 +205,11 @@ Hash slots giúp:
 
 Trong trạng thái stable:
 
-```text
-slot 0       → Master A
-slot 1       → Master A
-...
-slot 5461    → Master B
-...
-slot 16383   → Master C
-```
+| Slot | Owner minh họa |
+| --- | --- |
+| 0, 1, … | Master A |
+| 5461, … | Master B |
+| 16383 | Master C |
 
 Nếu một slot không có node nào serve và `cluster-require-full-coverage yes`, cluster có thể báo fail để tránh dữ liệu không đầy đủ.
 
@@ -408,10 +403,13 @@ Không xóa `nodes.conf` bừa bãi trong production, vì có thể làm node đ
 
 Cluster dùng replication theo từng master shard:
 
-```text
-Master A owns slots 0-5460
-Replica A1 follows Master A
-Replica A2 follows Master A
+```d2 title="Một shard có nhiều replica"
+direction: down
+a: "Master A\nSlots 0–5460"
+a1: "Replica A1"
+a2: "Replica A2"
+a -> a1: "Replication"
+a -> a2: "Replication"
 ```
 
 Nếu Master A fail, một replica của A được promote và nhận các slots `0-5460`.
@@ -532,11 +530,11 @@ Redis Cluster ưu tiên availability khi **majority của master nodes** còn ho
 
 Ví dụ 3 masters, 3 replicas:
 
-```text
-A(master) + A1(replica)
-B(master) + B1(replica)
-C(master) + C1(replica)
-```
+| Shard | Primary | Replica |
+| --- | --- | --- |
+| A | A | A1 |
+| B | B | B1 |
+| C | C | C1 |
 
 Nếu B chết nhưng B1 còn sống, cluster có thể promote B1 và tiếp tục serve toàn bộ slots.
 
@@ -705,9 +703,21 @@ Replica migration là cơ chế cluster có thể chuyển replica từ master c
 
 Ví dụ:
 
-```text
-Master A có 2 replicas: A1, A2
-Master B có 0 replicas
+```d2 mode=steps title="Replica migration có thể phân bổ lại replica giữa các shard"
+direction: right
+a: "Master A"
+a1: "Replica A1"
+a2: "Replica A2"
+b: "Master B — chưa có replica"
+a -> a1
+a -> a2
+steps: {
+  migration: {
+    (a -> a2)[0]: null
+    b: "Master B"
+    b -> a2: "A2 được migration nếu đủ điều kiện"
+  }
+}
 ```
 
 Cluster có thể migrate A2 sang replicate B để B được bảo vệ.
@@ -1120,10 +1130,14 @@ Khuyến nghị cơ bản:
 
 Không đặt master và replica của cùng shard trên cùng host/AZ.
 
-```text
-AZ1: Master A, Replica B1
-AZ2: Master B, Replica C1
-AZ3: Master C, Replica A1
+```d2 title="Tách master và replica của cùng shard sang AZ khác"
+direction: right
+az1: AZ1 { a: "Master A"; b1: "Replica B1" }
+az2: AZ2 { b: "Master B"; c1: "Replica C1" }
+az3: AZ3 { c: "Master C"; a1: "Replica A1" }
+az1.a -> az3.a1: Replication
+az2.b -> az1.b1: Replication
+az3.c -> az2.c1: Replication
 ```
 
 Nếu AZ1 chết, replica của A vẫn ở AZ3.

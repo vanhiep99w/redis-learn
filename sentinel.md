@@ -32,11 +32,11 @@
 
 Nói ngắn gọn:
 
-```text
-Replication tạo bản sao dữ liệu.
-Sentinel tự động failover khi master lỗi.
-Cluster sharding dữ liệu + HA theo từng shard.
-```
+| Cơ chế | Vai trò |
+| --- | --- |
+| Replication | Tạo bản sao dữ liệu |
+| Sentinel | Điều phối failover khi primary lỗi |
+| Cluster | Sharding và HA theo shard |
 
 Một mô hình Sentinel cơ bản:
 
@@ -257,9 +257,7 @@ Nếu Box 1 chết, S1 cũng chết. S2 còn sống nhưng chỉ có 1/2 vote, k
 
 Với 3 Sentinel, majority là 2. Nếu một host chết, còn 2 Sentinel vẫn đạt majority.
 
-```text
-S1 chết, S2 + S3 còn sống → 2/3 → failover được
-```
+Ví dụ S1 chết, S2 và S3 còn sống: 2/3 Sentinel có thể đủ majority để tiến hành failover **nếu quorum và các điều kiện khác đều thỏa**.
 
 Khuyến nghị:
 
@@ -295,11 +293,15 @@ Nhưng có thể chỉ S1 bị lỗi mạng.
 
 Khi đủ Sentinel cùng đồng ý master down theo quorum, master được đánh dấu **ODOWN**.
 
-```text
-S1 thấy master down
-S2 thấy master down
-quorum = 2
-⇒ master ODOWN
+```d2 title="ODOWN cần đủ Sentinel cùng đồng ý"
+direction: down
+s1: "S1 thấy master down"
+s2: "S2 thấy master down"
+quorum: "Quorum=2 cùng đồng ý"
+odown: "Master ODOWN\nChưa đồng nghĩa đủ majority để failover"
+s1 -> quorum
+s2 -> quorum
+quorum -> odown
 ```
 
 ODOWN mới là điều kiện để bắt đầu failover.
@@ -488,11 +490,11 @@ replica-priority 0
 
 ### Ví dụ chọn replica
 
-```text
-Replica R2: priority=100, offset=100000, online
-Replica R3: priority=100, offset=99000, online
-Replica R4: priority=0,   offset=101000, online
-```
+| Replica | Priority | Offset | Trạng thái |
+| --- | --- | --- | --- |
+| R2 | 100 | 100000 | Online |
+| R3 | 100 | 99000 | Online |
+| R4 | 0 | 101000 | Không là ứng viên promote |
 
 R4 có offset mới nhất nhưng priority = 0 nên không được promote. R2 thắng R3 vì offset cao hơn.
 
@@ -500,11 +502,11 @@ R4 có offset mới nhất nhưng priority = 0 nên không được promote. R2 
 
 Ví dụ bạn có một replica local cùng AZ với master và một replica cross-region dùng DR/reporting:
 
-```text
-R2 local HA candidate: replica-priority 100
-R3 cross-region/reporting: replica-priority 500
-R4 backup-only: replica-priority 0
-```
+| Vai trò | replica-priority minh họa |
+| --- | --- |
+| R2 — local HA candidate | 100 |
+| R3 — cross-region/reporting | 500 |
+| R4 — backup-only | 0 — không promote |
 
 Sentinel sẽ ưu tiên R2 hơn R3 và không promote R4.
 
@@ -845,16 +847,26 @@ Nếu M trả `OK` rồi chết trước khi R nhận write, Sentinel có thể 
 
 Kịch bản nguy hiểm:
 
-```text
-Partition A: Old Master M1 + Client C1
-Partition B: Replica R2/R3 + Sentinel majority S2/S3
+```d2 title="Network partition chia old primary và Sentinel majority"
+direction: right
+a: "Partition A" { c: C1; old: "Old Master M1"; c -> old: Write }
+b: "Partition B" { r2: "Replica R2"; r3: "Replica R3"; sentinels: "Sentinel majority S2/S3"; sentinels -> r2: "Có thể promote" }
 ```
 
 S2/S3 không thấy M1, promote R2 thành master mới. Nhưng C1 vẫn ghi vào M1 ở partition A. Khi partition hồi phục, M1 bị reconfigure thành replica của R2 và dữ liệu ghi vào M1 trong thời gian đó bị discard.
 
-```text
-C1 writes to old M1  ── mất sau khi M1 follow new master
-C2 writes to new R2  ── được giữ theo topology mới
+```d2 title="Write ở old master có thể mất khi rejoin"
+direction: right
+c1: "Client C1"
+old: "Old Master M1"
+lost: "Write mất khi M1\nfull sync theo new master"
+c2: "Client C2"
+new: "New Master R2"
+kept: "Write được giữ theo topology mới\nVẫn chịu persistence/replication policy"
+c1 -> old: "Write trong minority"
+old -> lost
+c2 -> new: "Write trong majority"
+new -> kept
 ```
 
 ### Giảm rủi ro bằng min-replicas
@@ -893,12 +905,17 @@ Sentinel chỉ điều phối failover. Dữ liệu an toàn hay không còn ph�
 
 Nếu master không bật RDB/AOF và process auto restart:
 
-```text
-1. Master crash.
-2. systemd/docker restart master ngay.
-3. Master quay lại với dataset rỗng.
-4. Sentinel có thể chưa kịp failover.
-5. Replicas sync dataset rỗng.
+```d2 title="Restart primary không persistence có thể xảy ra trước failover"
+direction: right
+n0: "Master crash"
+n1: "systemd / Docker restart ngay"
+n2: "Master quay lại với dataset rỗng"
+n3: "Sentinel có thể chưa kịp failover"
+n4: "Replica sync dataset rỗng\nMất các bản sao trong topology này"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 Đây là lỗi vận hành nghiêm trọng.

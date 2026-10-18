@@ -57,15 +57,20 @@ Stream là một chuỗi entry bất biến theo thứ tự append. Mỗi entry 
 - **Body** dạng field-value, không phải một blob duy nhất.
 - **Vị trí trong log** để range scan, replay, pending tracking.
 
-```diagram
-orders stream
-┌──────────────────┬──────────────────┬──────────────────┬──────────────────┐
-│ 1783400000000-0  │ 1783400000123-0  │ 1783400000123-1  │ 1783400000456-0  │
-│ event=created    │ event=paid       │ event=reserved   │ event=emailed    │
-│ order=8812       │ order=8812       │ order=8812       │ order=8812       │
-└──────────────────┴──────────────────┴──────────────────┴──────────────────┘
-   ▲ XRANGE từ đây                    ▲ XREAD từ last-id này
-   └────────────── consumer groups giữ con trỏ riêng ──────────────┘
+```d2 title="Stream là log có thứ tự ID và con trỏ đọc"
+log: "orders — ID tăng từ trái sang phải" {
+  grid-columns: 4
+  created: "1783400000000-0\nevent=created\norder=8812"
+  paid: "1783400000123-0\nevent=paid\norder=8812"
+  reserved: "1783400000123-1\nevent=reserved\norder=8812"
+  emailed: "1783400000456-0\nevent=emailed\norder=8812"
+}
+range: "XRANGE: khoảng ID bao gồm entry khớp"
+read: "XREAD: lấy ID lớn hơn last-id"
+groups: "Consumer groups có last-delivered-id riêng"
+range -> log: "Từ ID 1783400000000-0"
+read -> log: "last-id=1783400000123-1 → đọc sau ID này"
+groups -> log
 ```
 
 Ba đặc tính làm Streams khác các cấu trúc Redis quen thuộc:
@@ -88,35 +93,38 @@ Redis Stream không lưu mỗi entry thành một object riêng. Nếu làm vậ
 1. **Radix tree (`rax`)**: index theo ID của các block.
 2. **Listpack-packed macro-nodes**: mỗi leaf/block chứa nhiều entry liên tiếp, nén delta và chia sẻ field names.
 
-```diagram
-stream key: orders
-
-rax / radix tree (key = ID đầu hoặc ID đại diện của macro-node)
-┌──────────────────────────────────────────────────────────────────────┐
-│ 1783400000000-0 ─────▶ macro-node A (listpack, ~tens/100s entries)   │
-│ 1783400001500-0 ─────▶ macro-node B (listpack, ~tens/100s entries)   │
-│ 1783400003000-0 ─────▶ macro-node C (listpack, ~tens/100s entries)   │
-└──────────────────────────────────────────────────────────────────────┘
-
-macro-node B / listpack
-┌──────────────────────────────────────────────────────────────────────┐
-│ master entry: id=1783400001500-0 fields=[event,order_id,amount,uid]  │
-│ entry +0ms +0seq values=[created,8812,250000,42]                     │
-│ entry +8ms +0seq values=[paid,8812,250000,42]                        │
-│ entry +8ms +1seq values=[reserved,8812,1,sku-7]                      │
-└──────────────────────────────────────────────────────────────────────┘
+```d2 title="Stream radix tree trỏ tới các listpack macro-node"
+direction: right
+rax: "orders — radix tree\nID đại diện → macro-node"
+ma: "Macro-node A\nID đại diện: 1783400000000-0\nListpack — nhiều entries"
+mb: "Macro-node B — listpack\nID đại diện: 1783400001500-0" {
+  grid-columns: 1
+  master: "Master entry: id=1783400001500-0\nfields=[event, order_id, amount, uid]"
+  e0: "+0ms +0seq\nvalues=[created, 8812, 250000, 42]"
+  e1: "+8ms +0seq\nvalues=[paid, 8812, 250000, 42]"
+  e2: "+8ms +1seq\nvalues=[reserved, 8812, 1, sku-7]"
+}
+mc: "Macro-node C\nID đại diện: 1783400003000-0\nListpack — nhiều entries"
+rax -> ma
+rax -> mb
+rax -> mc
 ```
 
 ### 3.1. Vì sao radix tree hợp với Stream ID?
 
 Radix tree là phần giúp Redis tìm đúng vùng dữ liệu nhanh, giống mục lục nén cho các ID đang tăng dần. Stream ID là chuỗi số tăng dần; radix tree nén prefix chung giữa các ID, nên các ID gần nhau chia sẻ nhiều byte đầu:
 
-```diagram
-1783400000...
-├── 000-0
-├── 123-0
-├── 123-1
-└── 456-0
+```d2 title="Radix tree khai thác tiền tố chung của Stream ID"
+direction: down
+prefix: "Tiền tố chung: 1783400000…"
+a: "Hậu tố 000-0"
+b: "Hậu tố 123-0"
+c: "Hậu tố 123-1"
+d: "Hậu tố 456-0"
+prefix -> a
+prefix -> b
+prefix -> c
+prefix -> d
 ```
 
 Hệ quả:
@@ -158,14 +166,14 @@ Nếu lưu field name `event`, `order_id`, `amount`, `uid` cho từng entry thì
 
 Trim là thao tác dọn bớt entry cũ để Stream không phình RAM; khác biệt giữa `~` và `=` nằm ở mức Redis được phép “dọn theo block” hay phải “cắt đúng từng dòng”. Vì Stream được đóng gói theo macro-node, cắt chính xác từng entry ở giữa listpack có thể phải mở/sửa macro-node. Cắt approximate cho phép Redis đợi đến khi có thể **evict cả macro-node**.
 
-```diagram
-Exact trim (= 1000)
-[macro A: 80 entries] [macro B: 80] ... cần xóa 13 entry đầu của macro K
-                                      └─ phải sửa listpack
-
-Approx trim (~ 1000)
-[macro A: 80 entries] [macro B: 80] ... chỉ xóa khi bỏ trọn macro-node
-└──── evict cả block ────┘              └─ nhanh hơn, sai số vài chục entry
+```d2 title="Exact trim và approximate trim khác đơn vị loại bỏ"
+direction: right
+exact: "Exact trim =1000"
+partial: "Có thể phải xóa một phần macro-node\nVí dụ 13 entries đầu macro K\nPhải sửa listpack"
+approx: "Approximate trim ~1000"
+whole: "Ưu tiên bỏ trọn macro-node\nÍt thao tác hơn\nCó thể giữ nhiều hơn target"
+exact -> partial
+approx -> whole
 ```
 
 Đây là chi tiết nhỏ nhưng thay đổi production: với high-throughput stream, `MAXLEN ~` thường là khác biệt giữa trim nhẹ nhàng và latency spike.
@@ -175,6 +183,8 @@ Approx trim (~ 1000)
 ## 4. Entry ID: `<ms>-<seq>`, `*`, explicit ID và `NOMKSTREAM`
 
 Entry ID có dạng:
+
+<!-- diagram-text: Tách hai thành phần của literal Stream ID; dấu nối và vị trí ký tự là nội dung cần giữ chính xác. -->
 
 ```text
 1783400000123-1
@@ -251,13 +261,17 @@ XREAD BLOCK 5000 STREAMS orders $
 
 Cẩn thận với `$`:
 
-```diagram
-T1: consumer gọi XREAD ... $
-T2: nhận e101, xử lý xong
-T3: consumer gọi lại XREAD ... $
-T4: e102 đã được XADD giữa T2 và T3
-
-Kết quả: e102 có thể bị bỏ qua vì $ nhảy tới "đuôi hiện tại".
+```d2 title="Gọi lại XREAD với dollar có thể bỏ lỡ event giữa hai lần đọc"
+shape: sequence_diagram
+c: "Consumer"
+r: "Redis Stream"
+p: "Producer"
+c -> r: "T1: XREAD dùng dollar"
+p -> r: "XADD e101"
+r -> c: "T2: nhận e101 và xử lý"
+p -> r: "XADD e102 giữa T2 và T3"
+c -> r: "T3: XREAD dùng dollar lần nữa"
+r."Dollar là đuôi hiện tại\nCó thể bỏ qua e102 đã tồn tại"
 ```
 
 Nếu cần không mất message, hãy lưu `last_id` sau mỗi batch hoặc dùng consumer group. `$` phù hợp cho "tail live từ bây giờ", không phù hợp cho reliable processing.
@@ -340,24 +354,36 @@ Redis **không** push message đều cho worker như Kafka consumer rebalance. A
 | Scale out worker | Thêm process gọi cùng group name; không cần reassign partition |
 | So với Kafka | Không có partition ownership cố định; không “đúng 1 consumer = 1 partition” |
 
-```text
-payment-1 ──XREADGROUP >──▶  lấy 50 entry mới (giao + vào PEL của payment-1)
-payment-2 ──XREADGROUP >──▶  lấy 50 entry *tiếp theo* chưa giao
+```d2 title="Hai consumer trong cùng group lấy các batch mới khác nhau"
+shape: sequence_diagram
+p1: "payment-1"
+r: "orders / g:payment"
+p2: "payment-2"
+p1 -> r: "XREADGROUP … COUNT 50 STREAMS orders >"
+r -> p1: "50 entry mới\nVào PEL của payment-1"
+p2 -> r: "XREADGROUP … COUNT 50 STREAMS orders >"
+r -> p2: "50 entry tiếp theo chưa giao\nVào PEL của payment-2"
 ```
 
 Vì vậy autoscaling worker **có ích** cho throughput, nhưng không đảm bảo fair share tuyệt đối; consumer chậm không “giữ slot” ngăn consumer khác lấy việc **mới** — chỉ giữ **pending đã giao**.
 
 Group state trong Redis:
 
-```diagram
-group g:payment trên stream orders
-├── last_delivered_id: 1783400000456-0
-├── consumers
-│   ├── payment-1: seen_time, active_time, PEL riêng
-│   └── payment-2: seen_time, active_time, PEL riêng
-└── PEL per-group
-    ├── 1783400000123-0 → owner=payment-1, idle=5s, deliveries=1
-    └── 1783400000300-0 → owner=payment-2, idle=90s, deliveries=3
+```d2 title="Consumer group có last-delivered-id và PEL"
+direction: right
+group: "g:payment trên orders" {
+  last: "last_delivered_id\n1783400000456-0"
+  consumers: Consumers {
+    p1: "payment-1\nseen_time / active_time\nPEL riêng"
+    p2: "payment-2\nseen_time / active_time\nPEL riêng"
+  }
+  pel: "PEL per-group" {
+    e1: "1783400000123-0\nidle=5s / deliveries=1"
+    e2: "1783400000300-0\nidle=90s / deliveries=3"
+  }
+  pel.e1 -> consumers.p1: Owner
+  pel.e2 -> consumers.p2: Owner
+}
 ```
 
 ### 7.1. `>` vs specific ID — khác nhau sống còn
@@ -472,12 +498,18 @@ XACK orders g:payment 1783400000300-0 1783400000301-0
 
 Streams + consumer group mặc định cho semantics **at-least-once** (xử lý ít nhất một lần; có thể trùng nếu crash/retry):
 
-```diagram
-1. Worker nhận e1 → Redis đưa e1 vào PEL
-2. Worker xử lý side effect: charge payment thành công
-3. Worker chết trước XACK
-4. Janitor XAUTOCLAIM e1 cho worker khác
-5. e1 được xử lý lần nữa
+```d2 title="Crash trước XACK dẫn tới xử lý lại side effect"
+shape: sequence_diagram
+w: "Worker 1"
+r: "Redis Stream / PEL"
+payment: "Payment service"
+j: "Janitor / Worker 2"
+r -> w: "1. Giao e1 và đưa vào PEL"
+w -> payment: "2. Charge payment thành công"
+w."3. Chết trước XACK"
+j -> r: "4. XAUTOCLAIM e1"
+r -> j: "e1 được giao lại"
+j -> payment: "5. Có thể charge lần nữa nếu thiếu idempotency"
 ```
 
 Kết luận: consumer phải **idempotent** (xử lý lặp lại cùng một message không tạo side effect sai).
@@ -567,13 +599,19 @@ XSETID orders 1783400009999-0
 
 Decision nhanh:
 
-```diagram
-Cần message còn lại khi consumer offline?
-├─ Không → Pub/Sub
-└─ Có
-   ├─ Cần replay/range/consumer group/ack? → Stream
-   ├─ Chỉ một hàng đợi đơn giản, pop là xong? → List
-   └─ Cần partition distributed, retention TB, ecosystem connector? → Kafka
+```d2 title="Chọn Stream, List, Pub/Sub hoặc Kafka"
+direction: down
+offline: "Cần message khi\nconsumer offline?" {shape: diamond}
+pub: "Pub/Sub\nKhông giữ history"
+need: "Nhu cầu lưu / xử lý?" {shape: diamond}
+stream: "Stream\nReplay / range / groups / ACK"
+list: "List\nQueue đơn giản, pop để lấy"
+kafka: "Kafka / broker\nDistributed partitions\nRetention lớn / connectors"
+offline -> pub: "Không"
+offline -> need: "Có"
+need -> stream: "Cần replay / ACK"
+need -> list: "Queue đơn giản"
+need -> kafka: "Cần distributed log lớn"
 ```
 
 ### Khi nào KHÔNG nên dùng Streams

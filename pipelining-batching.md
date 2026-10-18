@@ -147,12 +147,16 @@ Ba cơ chế này hay bị nhầm.
 
 ### Pipeline không atomic
 
-```text
-Client A pipeline:
-  GET balance
-  SET balance 90
-
-Client B có thể chạy command giữa GET và SET nếu không dùng transaction/Lua.
+```d2 title="Pipeline không cô lập read-modify-write"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis"
+b: "Client B"
+a -> r: "GET balance"
+r -> a: "100"
+b -> r: "SET balance 200 — có thể xen vào"
+a -> r: "SET balance 90"
+r."Pipeline không tạo atomic scope\nCần transaction/optimistic check/Lua phù hợp"
 ```
 
 Nếu cần check-and-set, dùng `WATCH`/`MULTI` hoặc Lua.
@@ -192,17 +196,10 @@ App gọi một `EVALSHA` thay vì nhiều round trip và vẫn atomic.
 
 Batch quá nhỏ không tận dụng pipeline. Batch quá lớn tăng latency tail, memory buffer và blast radius khi retry.
 
-```text
-Batch size nhỏ:
-  + latency từng item thấp
-  - throughput chưa tối ưu
-
-Batch size lớn:
-  + throughput cao
-  - response chờ lâu hơn
-  - buffer lớn
-  - retry khó hơn
-```
+| Batch size | Ưu điểm | Đánh đổi |
+| --- | --- | --- |
+| Nhỏ | Latency mỗi item thấp | Throughput có thể chưa tối ưu |
+| Lớn | Throughput có thể cao | Chờ response lâu, buffer lớn, retry khó hơn |
 
 ### Gợi ý ban đầu
 
@@ -240,11 +237,11 @@ Batch size lớn:
 
 Vì response theo đúng thứ tự command, client cần map response về request bằng index.
 
-```text
-commands[0] = SET a 1  -> replies[0] = OK
-commands[1] = INCR b   -> replies[1] = integer
-commands[2] = HGET x y -> replies[2] = bulk/null
-```
+| Index | Command | Reply tương ứng |
+| --- | --- | --- |
+| 0 | `SET a 1` | `OK` |
+| 1 | `INCR b` | Integer |
+| 2 | `HGET x y` | Bulk / null |
 
 ### Lỗi từng command
 
@@ -262,11 +259,14 @@ App không nên xem “pipeline fail” là tất cả fail nếu library trả 
 
 Nếu connection bị đứt sau khi client gửi pipeline nhưng trước khi đọc response, client không biết Redis đã thực thi bao nhiêu command.
 
-```text
-Client sends 100 commands
-Redis executes 60 commands
-Connection drops before replies
-Client sees timeout
+```d2 title="Timeout không cho biết bao nhiêu pipeline command đã chạy"
+shape: sequence_diagram
+c: "Client"
+r: "Redis"
+c -> r: "Gửi pipeline 100 commands"
+r."Ví dụ đã execute 60 commands"
+r."Connection đứt trước replies"
+c."Chỉ thấy timeout\nKhông suy ra được trạng thái từng write"
 ```
 
 Retry toàn bộ có thể duplicate side effects.

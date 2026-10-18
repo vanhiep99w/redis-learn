@@ -113,11 +113,16 @@ Nếu process chết sau `SETNX` trước `EXPIRE`, lock không có TTL và kẹ
 
 Token nên có đủ entropy, ví dụ UUID v4/CSPRNG 128 bit. Nó phân biệt lease A với lease B của cùng process:
 
-```text
-Worker-1 acquire lần 1: token abc
-lease abc hết hạn
-Worker-2 acquire: token xyz
-Worker-1 tỉnh lại không được xóa xyz
+```d2 title="Ownership token phân biệt từng lần acquire"
+shape: sequence_diagram
+w1: "Worker 1"
+r: "Redis lock"
+w2: "Worker 2"
+w1 -> r: "Acquire lần 1: token abc"
+r."Lease abc hết hạn"
+w2 -> r: "Acquire token xyz"
+w1 -> r: "Release với token abc"
+r -> w1: "Không xóa vì token hiện tại là xyz"
 ```
 
 Không dùng value cố định `locked`, PID hay hostname làm ownership token.
@@ -142,12 +147,20 @@ DEL lock:order:8812
 
 Race:
 
-```text
-T0 A acquire tokenA, TTL 10s
-T11 A bị pause; lock hết hạn
-T12 B acquire tokenB
-T13 A tỉnh và DEL → xóa lock của B
-T14 C acquire → B và C cùng chạy
+```d2 title="DEL mù có thể xóa lease của owner mới"
+shape: sequence_diagram
+a: "Worker A"
+r: "Redis lock"
+b: "Worker B"
+c: "Worker C"
+a -> r: "T0: acquire tokenA, TTL 10s"
+a."Bị pause"
+r."T11: lease A đã hết hạn"
+b -> r: "T12: acquire tokenB"
+a -> r: "T13: tỉnh lại, DEL mù xóa lock của B"
+c -> r: "T14: acquire tokenC"
+b."B vẫn chạy critical section"
+c."C cũng chạy → overlap"
 ```
 
 Đúng: chỉ xóa nếu value vẫn là token của mình.
@@ -185,13 +198,19 @@ Release result `0` nghĩa là lock đã hết hạn, mất ownership hoặc key 
 
 Timeline nguy hiểm dù acquire/release đúng:
 
-```text
-T0 A acquire lease tokenA TTL=10s
-T1 A đọc dữ liệu
-T2 A bị stop-the-world GC / VM pause 15s
-T10 lease hết hạn
-T11 B acquire và cập nhật resource
-T17 A tỉnh, vẫn chạy code cũ và cập nhật resource
+```d2 title="Lease expiry không ngăn owner cũ tiếp tục ghi resource"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis lease"
+b: "Client B"
+db: "Protected resource"
+a -> r: "T0: acquire tokenA, TTL 10s"
+a -> db: "T1: đọc dữ liệu"
+a."T2: GC / VM pause 15s"
+r."T10: lease A hết hạn"
+b -> r: "T11: acquire tokenB"
+b -> db: "Cập nhật resource"
+a -> db: "T17: tỉnh, vẫn ghi bằng trạng thái cũ"
 ```
 
 Trong khoảng sau T11, A và B đều thực thi logic. A có thể không biết lease đã mất vì không có network call trong lúc pause. Kiểm tra `GET token` trước write cũng có race giữa check và write nếu resource là database khác.
@@ -326,13 +345,20 @@ Có thể publish khi unlock để waiter thức sớm, nhưng Pub/Sub có thể
 
 Redis replication thường asynchronous:
 
-```text
-T1 Client A SET lock trên primary P
-T2 P trả OK nhưng write chưa tới replica R
-T3 P chết
-T4 R promote, không có lock
-T5 Client B SET lock trên R → OK
-→ A và B đều nghĩ giữ lock
+```d2 title="Failover trước replication có thể tạo hai owner"
+shape: sequence_diagram
+a: "Client A"
+p: "Primary P"
+r: "Replica R"
+b: "Client B"
+a -> p: "T1: SET lock tokenA NX PX …"
+p -> a: "T2: OK"
+p."T3: chết trước khi replica nhận write"
+r."T4: promote, không có lock"
+b -> r: "T5: SET lock tokenB NX PX …"
+r -> b: "OK"
+a."A vẫn nghĩ giữ lock"
+b."B cũng nghĩ giữ lock"
 ```
 
 `WAIT` giảm xác suất bằng cách chờ replica acknowledge, nhưng không tạo linearizable consensus/commit tuyệt đối; acknowledge replication không nhất thiết đồng nghĩa durable, và failover policy vẫn quan trọng.
@@ -410,11 +436,15 @@ Khi reshard, client library phải xử lý `MOVED`/`ASK`; Lua multi-key cần s
 
 ### 12.1. Chống duplicate cron
 
-```text
-acquire lock:cron:daily-report:2026-07-10
-→ insert job row UNIQUE(job_type, business_date)
-→ enqueue job idempotently
-→ release
+```d2 title="Cron lock vẫn cần durable deduplication"
+direction: right
+n0: "Acquire lock:cron:daily-report:2026-07-10"
+n1: "Insert job row\nUNIQUE(job_type, business_date)"
+n2: "Enqueue job idempotently"
+n3: "Release khi còn ownership"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Unique constraint là correctness; Redis lock giảm tranh chấp/duplicate work.

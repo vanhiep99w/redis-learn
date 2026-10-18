@@ -45,17 +45,21 @@ Doc này trả lời các câu hỏi cốt lõi: vì sao `LPUSH`/`RPOP` là O(1)
 
 Redis List là một chuỗi string có thứ tự, tối ưu cho thao tác ở **left/head** và **right/tail**.
 
-```diagram
-        LPUSH                                      RPUSH
-          │                                          │
-          ▼                                          ▼
-   ╭──────────╮   ╭──────────╮   ╭──────────╮   ╭──────────╮
-   │ index 0  │──▶│ index 1  │──▶│ index 2  │──▶│ index -1 │
-   │  head    │◀──│          │◀──│          │◀──│  tail    │
-   ╰──────────╯   ╰──────────╯   ╰──────────╯   ╰──────────╯
-          ▲                                          ▲
-          │                                          │
-        LPOP                                        RPOP
+```d2 title="List là deque, thao tác ở hai đầu"
+direction: right
+lpush: LPUSH
+lpop: LPOP
+rpush: RPUSH
+rpop: RPOP
+head: "Index 0\nhead"
+n1: "Index 1"
+n2: "Index 2"
+tail: "Index -1\ntail"
+head <-> n1 <-> n2 <-> tail
+lpush -> head: "Thêm đầu"
+head -> lpop: "Lấy đầu"
+rpush -> tail: "Thêm cuối"
+tail -> rpop: "Lấy cuối"
 ```
 
 Quy ước nhớ nhanh:
@@ -95,13 +99,12 @@ Không phù hợp:
 
 Đây là điểm xuất phát để hiểu vì sao Redis không lưu List theo kiểu “mỗi item một cục riêng” như ví dụ trong sách. Linked list “sách giáo khoa” có vẻ hợp cho queue: push/pop hai đầu O(1). Nhưng nếu mỗi element là một node malloc riêng, memory rất tốn:
 
-```diagram
-╭────────────╮     ╭────────────╮     ╭────────────╮
-│ prev ptr   │◀───▶│ prev ptr   │◀───▶│ prev ptr   │
-│ next ptr   │     │ next ptr   │     │ next ptr   │
-│ malloc hdr │     │ malloc hdr │     │ malloc hdr │
-│ "job:1"    │     │ "job:2"    │     │ "job:3"    │
-╰────────────╯     ╰────────────╯     ╰────────────╯
+```d2 title="Linked list thuần tốn metadata mỗi phần tử"
+direction: right
+a: "prev ptr / next ptr\nmalloc header\njob:1"
+b: "prev ptr / next ptr\nmalloc header\njob:2"
+c: "prev ptr / next ptr\nmalloc header\njob:3"
+a <-> b <-> c
 ```
 
 Một payload 20 bytes có thể kéo theo 16 bytes pointer + allocator overhead + cache miss. Với 10 triệu item, overhead này biến thành hàng trăm MB.
@@ -110,11 +113,17 @@ Một payload 20 bytes có thể kéo theo 16 bytes pointer + allocator overhead
 
 Listpack giống một hộp nhỏ chứa nhiều món liền nhau: mục tiêu là giảm pointer rời rạc và tận dụng cache CPU tốt hơn. Redis hiện đại dùng **listpack** để lưu nhiều entry nhỏ trong một vùng memory liên tục:
 
-```diagram
-╭────────────────────────────────────────────────────────────────╮
-│ total-bytes │ num-elems │ entry1 │ entry2 │ entry3 │ ... │ END │
-╰────────────────────────────────────────────────────────────────╯
-                         mỗi entry ≈ [encoding + data + backlen]
+```d2 title="Listpack lưu entry trong một khối liên tiếp"
+group: "Listpack — sơ đồ trường, không theo tỷ lệ byte" {
+  grid-columns: 7
+  n0: "total-bytes"
+  n1: "num-elems"
+  n2: "entry1\nencoding + data + backlen"
+  n3: "entry2"
+  n4: "entry3"
+  n5: "…"
+  n6: "END"
+}
 ```
 
 Lợi ích:
@@ -132,15 +141,12 @@ Nhược điểm: chèn/xóa giữa listpack phải `memmove` phần sau. Vì v�
 
 Quicklist là cách Redis ghép nhiều “hộp” listpack thành một chuỗi, để vẫn push/pop nhanh ở hai đầu mà không tạo một khối khổng lồ khó sửa. Redis List được encode bằng **quicklist**: một doubly-linked list, mỗi node chứa một listpack hoặc plain node.
 
-```diagram
-╭──────────────────╮      ╭──────────────────╮      ╭──────────────────╮
-│ quicklist node A │◀────▶│ quicklist node B │◀────▶│ quicklist node C │
-│ ╭──────────────╮ │      │ ╭──────────────╮ │      │ ╭──────────────╮ │
-│ │ listpack     │ │      │ │ listpack     │ │      │ │ listpack     │ │
-│ │ e1 e2 ... eN │ │      │ │ ...          │ │      │ │ ... tail     │ │
-│ ╰──────────────╯ │      │ ╰──────────────╯ │      │ ╰──────────────╯ │
-╰──────────────────╯      ╰──────────────────╯      ╰──────────────────╯
-        head                    có thể nén                  tail
+```d2 title="Quicklist nối các node chứa listpack"
+direction: right
+a: "Quicklist node A — head" { pack: "Listpack\ne1 e2 … eN" }
+b: "Quicklist node B — có thể nén" { pack: "Listpack\n…" }
+c: "Quicklist node C — tail" { pack: "Listpack\n… tail" }
+a <-> b <-> c
 ```
 
 Đây là thỏa hiệp thông minh:
@@ -176,13 +182,16 @@ list-compress-depth 0
 | `list-compress-depth 1` | Chừa 1 node mỗi đầu, nén node bên trong bằng LZF | Head/tail nhanh, giữa list tốn decompress |
 | `list-compress-depth 2` | Chừa 2 node mỗi đầu | An toàn hơn nếu hay đọc gần hai đầu |
 
-```diagram
-list-compress-depth 2
-
-╭────────╮ ╭────────╮ ╭────────╮ ╭────────╮ ╭────────╮ ╭────────╮
-│ plain  │▶│ plain  │▶│  LZF   │▶│  LZF   │▶│ plain  │▶│ plain  │
-╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯
-  head      head+1     interior   interior    tail-1     tail
+```d2 title="list-compress-depth 2 giữ hai node ở mỗi đầu không nén"
+group: "Quicklist với list-compress-depth 2" {
+  grid-columns: 6
+  n0: "head\nplain"
+  n1: "head+1\nplain"
+  n2: "interior\nLZF"
+  n3: "interior\nLZF"
+  n4: "tail-1\nplain"
+  n5: "tail\nplain"
+}
 ```
 
 > [!TIP]
@@ -230,21 +239,16 @@ LLEN demo:list
 
 ### 4.2. Vì sao hai đầu O(1), còn giữa O(N)?
 
-```diagram
-Muốn LPOP:
-
-╭──────╮    ╭──────╮    ╭──────╮
-│ head │───▶│ node │───▶│ tail │
-╰──────╯    ╰──────╯    ╰──────╯
-   ▲
-   ╰─ biết sẵn pointer head → pop ngay
-
-Muốn LINDEX 700000:
-
-╭──────╮──▶╭──────╮──▶╭──────╮──▶ ... ──▶ ╭────────────╮
-│ head │   │ node │   │ node │            │ index 700k │
-╰──────╯   ╰──────╯   ╰──────╯            ╰────────────╯
-   phải đi từng node/listpack đến vị trí gần nhất từ head hoặc tail
+```d2 title="Chi phí truy cập hai đầu và vị trí giữa List"
+direction: right
+pop: "LPOP"
+head: "Có sẵn pointer head\nPop ngay — O(1)"
+index: "LINDEX 700000"
+walk: "Đi qua các node/listpack\ntừ đầu gần hơn"
+target: "Tới vị trí cần lấy\nO(N) theo khoảng cần duyệt"
+pop -> head
+index -> walk
+walk -> target
 ```
 
 `LRANGE key start stop` có hai phần chi phí:
@@ -272,18 +276,16 @@ Ví dụ list 1.000.000 item:
 
 “Blocking” ở đây nên hiểu như worker ngồi chờ ở quầy, còn Redis vẫn phục vụ các quầy khác bình thường. `BLPOP key [key ...] timeout` hoặc `BRPOP key [key ...] timeout` pop từ list có dữ liệu; nếu tất cả rỗng, client bị park cho tới khi có push hoặc timeout. `timeout 0` nghĩa là chờ vô hạn.
 
-```diagram
-╭────────────╮      BRPOP jobs 0       ╭──────────────────────╮
-│ Worker A   │────────────────────────▶│ Redis event loop     │
-╰────────────╯                         │ jobs rỗng            │
-                                       │ park Worker A        │
-                                       │ tiếp tục xử lý client│
-╭────────────╮      LPUSH jobs j1      │ khác                 │
-│ Producer   │────────────────────────▶│                      │
-╰────────────╯                         │ wake Worker A        │
-╭────────────╮      [jobs, j1]         │ pop j1 atomic        │
-│ Worker A   │◀────────────────────────│                      │
-╰────────────╯                         ╰──────────────────────╯
+```d2 title="BRPOP chỉ park client, Redis vẫn xử lý command khác"
+shape: sequence_diagram
+w: "Worker A"
+r: "Redis event loop"
+p: "Producer"
+w -> r: "BRPOP jobs 0"
+r."jobs rỗng → park Worker A\nTiếp tục phục vụ client khác"
+p -> r: "LPUSH jobs j1"
+r."Pop j1 atomic và wake Worker A"
+r -> w: "[jobs, j1]"
 ```
 
 Chi tiết đáng nhớ:
@@ -347,13 +349,17 @@ LPUSH q:email '{"id":"e-1001","to":"a@b.c"}'
 BRPOP q:email 5
 ```
 
-```diagram
-LPUSH e1, e2, e3
-
-head                                      tail
-╭────╮     ╭────╮     ╭────╮
-│ e3 │────▶│ e2 │────▶│ e1 │  ──BRPOP──▶ xử lý e1 trước
-╰────╯     ╰────╯     ╰────╯
+```d2 title="LPUSH và BRPOP tạo FIFO"
+direction: right
+queue: "Sau LPUSH e1, e2, e3" {
+  direction: right
+  e3: "e3 — head / mới nhất"
+  e2: e2
+  e1: "e1 — tail / cũ nhất"
+  e3 -> e2 -> e1
+}
+worker: "Worker xử lý e1 trước"
+queue.e1 -> worker: BRPOP
 ```
 
 Ưu điểm: đơn giản, nhanh, ít command. Nhược điểm lớn: worker crash sau khi pop nhưng trước khi xử lý xong → job đã bị xóa khỏi queue.
@@ -372,14 +378,14 @@ LREM q:email:processing:worker-7 1 '{"id":"e-1001",...}'
 
 Flow:
 
-```diagram
-╭────────────╮   BLMOVE RIGHT LEFT   ╭────────────────────────────╮
-│ q:email    │──────────────────────▶│ q:email:processing:worker  │
-│ pending    │                       │ in-flight                  │
-╰────────────╯                       ╰────────────────────────────╯
-        ▲                                         │
-        │ janitor requeue nếu quá hạn             │ LREM khi ack thành công
-        ╰─────────────────────────────────────────╯
+```d2 title="Reliable queue: pending, processing, ACK và requeue"
+direction: right
+q: "q:email\nPending"
+processing: "q:email:processing:worker\nIn-flight"
+ack: "ACK thành công\nLREM khỏi processing"
+q -> processing: "BLMOVE RIGHT LEFT — atomic"
+processing -> ack: "Xử lý thành công"
+processing -> q: "Janitor requeue job quá hạn"
 ```
 
 Đây là **at-least-once delivery**:
@@ -435,15 +441,12 @@ LTRIM user:42:feed 0 99
 
 Vì sao cặp này hiệu quả? Sau mỗi `LPUSH`, list dài 101, `LTRIM 0 99` chỉ bỏ 1 item ở tail. Complexity danh nghĩa O(N removed), thực tế gần O(1) nếu cap đều đặn.
 
-```diagram
-Trước: giữ 100 item
-╭───── newest ─────╮ ... ╭──── oldest ────╮
-
-LPUSH item mới → 101 item
-╭─ new ─╮ ╭──── 100 item cũ ────╮ ╭─ dư ─╮
-
-LTRIM 0 99 → cắt đúng phần dư ở tail
-╭─ new ─╮ ╭──── 99 item cũ ─────╮
+```d2 mode=steps title="Recent-N: thêm đầu rồi trim phần dư ở tail"
+list: "100 item\nnewest … oldest"
+steps: {
+  pushed: { list: "LPUSH item mới\n101 item: new + 100 item cũ" }
+  trimmed: { list: "LTRIM 0 99\n100 item: new + 99 item cũ\nLoại item dư ở tail" }
+}
 ```
 
 > [!TIP]
@@ -776,34 +779,19 @@ LREM q:payment:processing:w1 1 "$job"
 
 ### 13.1. Chọn pattern nào?
 
-```diagram
-                         ╭──────────────────────────╮
-                         │ Bạn cần queue/message gì?│
-                         ╰────────────┬─────────────╯
-                                      │
-                 ╭────────────────────┼────────────────────╮
-                 │                    │                    │
-        ╭────────▼────────╮  ╭────────▼────────╮  ╭────────▼────────╮
-        │ 1 job → 1 worker│  │ nhiều consumer  │  │ realtime only   │
-        │ đơn giản        │  │ ack/replay      │  │ mất cũng được   │
-        ╰────────┬────────╯  ╰────────┬────────╯  ╰────────┬────────╯
-                 │                    │                    │
-          Redis List           Redis Streams           Pub/Sub
-          LPUSH+BRPOP          XADD+XREADGROUP         PUBLISH/SUBSCRIBE
-                 │
-       ╭─────────▼─────────╮
-       │ không được mất job│
-       ╰─────────┬─────────╯
-                 │
-          BLMOVE + processing
-          + janitor + idempotency
-                 │
-       ╭─────────▼─────────╮
-       │ cần delay/priority│
-       ╰─────────┬─────────╯
-                 │
-          Sorted Set queue
-          score = run_at/priority
+```d2 title="Chọn pattern cho queue và realtime message"
+direction: down
+need: "Bạn cần queue/message gì?" {shape: diamond}
+list: "1 job → 1 worker đơn giản\nList: LPUSH + BRPOP"
+stream: "Nhiều consumer, ACK/replay\nStreams: XADD + XREADGROUP"
+pub: "Realtime, chấp nhận mất\nPub/Sub"
+reliable: "Cần xử lý crash/retry\nBLMOVE + processing\njanitor + idempotency"
+zset: "Cần delay / priority\nSorted Set queue\nscore = run_at / priority"
+need -> list
+need -> stream
+need -> pub
+list -> reliable: "Cần recover job chưa ACK"
+reliable -> zset: "Cần lịch chạy / priority"
 ```
 
 ### 13.2. Command cheat sheet

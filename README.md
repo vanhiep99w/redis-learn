@@ -98,7 +98,8 @@ app -> db: Query khi cache miss
 
 - Thêm `mode=steps` cùng `steps: { ... }` khi cần diễn giải nhiều trạng thái; xem [Cluster](./cluster.md) và [Sentinel](./sentinel.md).
 - Icon từ [D2 Icons](https://icons.d2lang.com/) nên lưu local và ghi nguồn. Icon Redis đã được vendor trong `public/icons/d2/`; script prepare rewrite URL trong fence D2, plugin nhúng icon vào SVG. Thêm icon mới phải bổ sung mapping tương ứng.
-- Giữ log, RESP payload, công thức và text cần căn vị trí ở dạng text. Không biến bảng dữ liệu hay mọi ví dụ ngắn thành diagram.
+- Không dùng fence `diagram` hay Mermaid: sơ đồ cấu trúc file, memory layout, cây dữ liệu, luồng và sequence đều được cân nhắc D2, không phụ thuộc nhãn fence cũ.
+- Giữ log, RESP payload, công thức/phép tính bit và literal cần căn vị trí ở dạng text. Bảng so sánh, checklist và cheat sheet dùng Markdown thay vì đóng khung ASCII. Ngoại lệ ASCII cần ghi lý do ngay trước fence: `<!-- diagram-text: Lý do cần giữ vị trí ký tự. -->`.
 - Cache D2 nằm ở `.next/cache/docs-kit/d2`, không deploy cache. Trên Cloudflare Pages, bật **Build cache** trong dashboard; kiểm tra log restore cache thực tế.
 - Chỉ build D2/descriptor tin cậy trong repository. SVG được nhúng trực tiếp; các component không thực thi Redis command, Lua hay shell.
 
@@ -116,11 +117,14 @@ Không bật Source Explorer hoặc Protocol Exchange chỉ để có thêm comp
 ### Kiểm thử static export và trình duyệt
 
 ```bash
-npm run build
+npm run test:docs                  # parser audit + regression tests
+npm run build                      # tự chạy test:docs trước build
 npx playwright install chromium     # lần đầu, nếu chưa có browser
 npm run test:browser
 # Hoặc dùng Chrome đã cài trên máy:
 CHROME_PATH=/usr/bin/google-chrome npm run test:browser
 ```
 
-Smoke tests kiểm tra mọi fence trong static export, D2 zoom/download/theme/steps, copy command, walkthrough/diff/waterfall, mobile và fallback không JavaScript. Chạy lại build trước khi test nếu nội dung thay đổi.
+`test:docs` dùng Markdown AST để bắt fence cũ (`diagram`, Mermaid…), ASCII chưa review, khối không nhãn, fence `~~~` và diagram lồng blockquote/list — không chỉ grep `text`. Có thể xem danh sách text còn giữ bằng `node scripts/audit-diagrams.mjs --list-text`.
+
+Browser tests kiểm tra mọi fence trong static export, cấu trúc `dump.rdb`, D2 zoom/download/theme/steps, copy command, walkthrough/diff/waterfall, mobile và fallback không JavaScript. Chạy lại build trước khi test nếu nội dung thay đổi.

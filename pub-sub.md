@@ -64,13 +64,16 @@ Không phù hợp cho payment event, order workflow, job queue hoặc audit log 
 
 Redis Pub/Sub có semantics **at-most-once** ở tầng server delivery: message được đẩy một lần tới subscriber đang kết nối; nếu subscriber lỗi/mất kết nối/không xử lý kịp thì message mất, Redis không redeliver.
 
-```text
-T1 subscriber online
-T2 PUBLISH m1 → nhận m1
-T3 subscriber disconnect
-T4 PUBLISH m2 → m2 biến mất đối với subscriber này
-T5 reconnect
-T6 subscriber không có lệnh để đọc lại m2
+```d2 title="Subscriber offline không đọc lại được message Pub/Sub"
+shape: sequence_diagram
+r: "Redis Pub/Sub"
+s: "Subscriber"
+s -> r: "T1: subscribe, online"
+r -> s: "T2: PUBLISH m1 → nhận m1"
+s."T3: disconnect"
+r."T4: PUBLISH m2\nKhông giữ history cho subscriber offline"
+s -> r: "T5: reconnect và subscribe"
+s."T6: không có lệnh replay m2"
 ```
 
 ### 2.1. Không có backlog, ack hay consumer group
@@ -385,11 +388,17 @@ Nếu mọi gateway subscribe mọi message, fan-out nội bộ = gateways × me
 
 Notification quan trọng phải lưu vào database/inbox trước publish:
 
-```text
-transaction lưu notification unread
-→ publish signal notification_available(userId)
-→ WebSocket hiển thị
-→ nếu signal mất, client reconnect GET /notifications?after=cursor
+```d2 title="Durable unread state bù cho realtime signal bị mất"
+direction: right
+db: "Transaction lưu notification unread"
+publish: "Publish notification_available(userId)"
+ws: "WebSocket hiển thị"
+reconnect: "Nếu signal mất:\nClient reconnect"
+read: "GET /notifications?after=cursor\nĐọc durable state"
+db -> publish
+publish -> ws: "Nhận signal"
+db -> reconnect: "Signal có thể mất"
+reconnect -> read
 ```
 
 Pub/Sub làm realtime hint; durable inbox đảm bảo không mất business notification.

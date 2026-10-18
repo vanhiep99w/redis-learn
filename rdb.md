@@ -46,19 +46,15 @@ RDB (Redis Database) là cơ chế **point-in-time snapshot** (ảnh chụp tạ
 
 Hãy hình dung nó như chụp một tấm ảnh: mọi thứ trong khung hình tại giây bấm máy được lưu lại. Những gì thay đổi **sau** khoảnh khắc đó không có trong ảnh — cho tới lần chụp kế tiếp.
 
-```diagram
-Thời gian ──────────────────────────────────────────────▶
-   │            │                    │
- 12:00        12:05                12:10
- BGSAVE       BGSAVE               BGSAVE
-   │            │                    │
-   ▼            ▼                    ▼
-dump.rdb    dump.rdb             dump.rdb
-(ảnh #1)    (ảnh #2)             (ảnh #3)
-
-        ⚡ CRASH lúc 12:09
-        → phục hồi về ảnh #2 (12:05)
-        → MẤT 4 phút dữ liệu (12:05 → 12:09)
+```d2 title="Crash phục hồi về snapshot hoàn thành gần nhất"
+direction: right
+s1: "12:00\nBGSAVE hoàn thành\nSnapshot #1"
+s2: "12:05\nBGSAVE hoàn thành\nSnapshot #2"
+crash: "12:09 — CRASH\nMất write từ 12:05 tới 12:09"
+restore: "Restore snapshot #2\nTrạng thái tại 12:05"
+planned: "12:10\nLịch snapshot dự kiến\nChưa xảy ra trong nhánh crash"
+s1 -> s2 -> crash -> restore
+s2 -> planned: "Nếu không crash" {style.stroke-dash: 4}
 ```
 
 Đặc tính then chốt:
@@ -107,13 +103,16 @@ SAVE
 
 `SAVE` ghi RDB **ngay trong tiến trình chính (main thread)**. Vì Redis xử lý lệnh single-threaded (một luồng chính xử lý tuần tự phần lớn command; xem [Redis Architecture](./redis-architecture.md)), trong suốt thời gian ghi file, **không request nào khác được xử lý** — toàn bộ client bị treo.
 
-```diagram
-Main thread (single-threaded event loop):
-
-SAVE bắt đầu ──[ ghi toàn bộ dataset ra đĩa: 3 giây ]── SAVE xong
-                        │
-     Trong 3 giây này ──┴──▶ MỌI client GET/SET đều bị BLOCK
-                              p99 latency nhảy vọt, timeout hàng loạt
+```d2 title="SAVE giữ main thread cho tới khi ghi snapshot xong"
+shape: sequence_diagram
+a: "Client chạy SAVE"
+r: "Redis main thread"
+other: "Client GET/SET"
+a -> r: "SAVE bắt đầu"
+r."Ghi toàn bộ dataset ra đĩa\nVí dụ mất 3 giây"
+other -> r: "GET/SET phải chờ main thread"
+r -> a: "SAVE xong"
+r -> other: "Tiếp tục xử lý sau SAVE"
 ```
 
 Với dataset 10GB, `SAVE` có thể treo server nhiều giây tới cả phút → **gần như không bao giờ dùng trong production**.
@@ -128,12 +127,20 @@ BGSAVE
 
 `BGSAVE` (Background Save) dùng `fork()` (system call tạo tiến trình con trên Unix/Linux) để tạo một **tiến trình con**, con lo việc ghi file, còn tiến trình cha (main) tiếp tục phục vụ request bình thường nhờ Copy-on-Write (CoW — chỉ copy trang nhớ khi có ghi).
 
-```diagram
-Main process ──fork()──┬──▶ Child process ──[ ghi dump.rdb ]──▶ exit
-       │               │
-       │               └─ chia sẻ memory qua Copy-on-Write (CoW)
-       ▼
-tiếp tục phục vụ GET/SET, gần như không gián đoạn
+```d2 title="BGSAVE fork child để ghi snapshot nền"
+direction: right
+parent: "Parent\nMain process"
+child: "Child process"
+serve: "Tiếp tục phục vụ GET/SET\nFork vẫn có thể gây pause ngắn"
+shared: "Memory pages chia sẻ\nCopy-on-Write"
+file: "Ghi dump.rdb"
+exit: "Child exit"
+parent -> child: "fork()"
+parent -> serve
+parent -> shared
+child -> shared: "Đọc snapshot"
+child -> file
+file -> exit
 ```
 
 | | `SAVE` | `BGSAVE` |
@@ -163,14 +170,13 @@ Trực giác sai lầm: "fork tạo process con → phải copy toàn bộ 10GB 
 
 Thực tế, `fork()` trên Linux **không copy dữ liệu**. Nó chỉ copy **page table** (bảng ánh xạ trang nhớ). Cả cha và con **cùng trỏ vào những trang RAM vật lý giống hệt nhau**, được đánh dấu **read-only**.
 
-```diagram
-Ngay sau fork():
-
-Parent page table ─┐
-                   ├──▶ [ Trang RAM vật lý ]  (read-only, dùng chung)
-Child page table ──┘
-
-→ KHÔNG tốn thêm 10GB. Chỉ tốn RAM cho page table (nhỏ).
+```d2 title="Sau fork, parent và child chia sẻ physical pages"
+direction: right
+parent: "Parent page table"
+child: "Child page table"
+page: "Physical RAM pages\nRead-only / dùng chung\nChưa copy toàn bộ dataset"
+parent -> page
+child -> page
 ```
 
 ### 5.2 Copy-on-Write: chỉ copy khi bị ghi
@@ -181,20 +187,27 @@ Copy-on-Write là mảnh ghép giúp snapshot vừa nhất quán vừa không ph
 
 Kịch bản: con đang đọc dataset để ghi ra file. Cha nhận lệnh `SET key1 newval` — cần sửa một trang.
 
-```diagram
-Cha muốn ghi vào trang P:
-
-1. CPU phát hiện P là read-only → page fault
-2. Kernel copy P thành P' (bản riêng cho cha)
-3. Cha ghi vào P' (bản mới)
-4. Con vẫn thấy P (bản cũ) → snapshot NHẤT QUÁN tại thời điểm fork
-
-┌──────────┐         ┌──────────┐
-│  Parent  │────────▶│    P'    │  (bản copy, có newval)
-└──────────┘         └──────────┘
-┌──────────┐         ┌──────────┐
-│  Child   │────────▶│    P     │  (bản gốc, val cũ — vào file)
-└──────────┘         └──────────┘
+```d2 mode=steps title="Copy-on-Write giữ snapshot của child nhất quán"
+direction: right
+parent: Parent
+child: Child
+page: "Trang P\nGiá trị tại lúc fork"
+parent -> page: "Mapping dùng chung"
+child -> page: "Đọc snapshot"
+steps: {
+  fault: {
+    parent: "Parent muốn ghi P\nCPU page fault vì mapping CoW"
+  }
+  copied: {
+    private: "Trang P′\nKernel copy P cho parent"
+    (parent -> page)[0]: null
+    parent -> private: "Mapping riêng sau CoW"
+  }
+  written: {
+    private: "Trang P′\nParent ghi newval"
+    page: "Trang P\nChild vẫn đọc giá trị cũ\nGhi vào snapshot"
+  }
+}
 ```
 
 Kết quả tuyệt vời: con luôn nhìn thấy **ảnh chụp đóng băng tại giây fork**, dù cha có sửa dữ liệu bao nhiêu đi nữa. Snapshot nhất quán mà không cần lock, không cần dừng ghi.
@@ -203,12 +216,17 @@ Kết quả tuyệt vời: con luôn nhìn thấy **ảnh chụp đóng băng t�
 
 Child **không** ghi đè trực tiếp `dump.rdb` đang dùng. Luồng an toàn:
 
-```text
-1. Child mở file tạm (vd. temp-<pid>.rdb)
-2. Serialize dataset → ghi vào file tạm
-3. fsync() file tạm  → dữ liệu trên đĩa, không chỉ page cache
-4. rename(temp, dump.rdb)  → atomic trên cùng filesystem
-5. Child exit; parent cập nhật lastsave / dirty
+```d2 title="Ghi RDB qua temp, fsync và atomic rename"
+direction: right
+n0: "Child mở temp-<pid>.rdb"
+n1: "Serialize dataset và ghi temp"
+n2: "fsync(temp)\nĐẩy dữ liệu tới storage"
+n3: "rename(temp, dump.rdb)\nAtomic trên cùng filesystem"
+n4: "Child exit\nParent cập nhật lastsave / dirty"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 | Tình huống | Hệ quả |
@@ -225,12 +243,16 @@ Child **không** ghi đè trực tiếp `dump.rdb` đang dùng. Luồng an toàn
 
 CoW không miễn phí. Cha càng ghi nhiều trong lúc `BGSAVE` chạy, càng nhiều trang bị copy, RAM thực dùng càng tăng.
 
-```diagram
-Write nhẹ trong lúc BGSAVE:
-  copy vài trang  →  RAM tăng ít  →  an toàn
-
-Write cực nặng (traffic ghi lớn) trong lúc BGSAVE:
-  copy rất nhiều trang → gần như nhân đôi dataset trong RAM → nguy cơ OOM
+```d2 title="Write-heavy trong BGSAVE làm tăng RAM cho CoW"
+direction: right
+light: "Write nhẹ trong BGSAVE"
+few: "Copy ít trang\nRAM tăng ít"
+heavy: "Write rất nhiều trong BGSAVE"
+many: "Copy nhiều trang\nCó thể gần thêm một dataset"
+oom: "Thiếu headroom\nNguy cơ OOM"
+light -> few
+heavy -> many
+many -> oom
 ```
 
 | Tình huống | RAM thêm do CoW | Rủi ro |
@@ -251,27 +273,30 @@ Write cực nặng (traffic ghi lớn) trong lúc BGSAVE:
 
 RDB là binary format được thiết kế để **compact và load nhanh**, không phải để người đọc. Nhưng hiểu cấu trúc giúp bạn debug corruption và hiểu vì sao load nhanh.
 
-```diagram
-┌──────────────────────── dump.rdb ────────────────────────┐
-│ "REDIS"          magic string (5 byte)                   │
-│ "0011"           version number RDB (4 byte)             │
-│ ── AUX fields ── metadata: redis-ver, redis-bits, ctime  │
-│ ── SELECTDB 0 ── đánh dấu database index                 │
-│ ── RESIZEDB ──── hint số key + số key có TTL (pre-alloc) │
-│ ┌─────────────────────────────────────────────────────┐  │
-│ │ [expire?] [type] [key] [value]                      │  │
-│ │ [expire?] [type] [key] [value]                      │  │  ← từng cặp
-│ │ ...                                                 │  │
-│ └─────────────────────────────────────────────────────┘  │
-│ ── SELECTDB 1 ── (nếu dùng nhiều DB)                     │
-│ ── EOF ──────── opcode kết thúc                          │
-│ CRC64            checksum 8 byte toàn file               │
-└──────────────────────────────────────────────────────────┘
+```d2 title="Cấu trúc logic của file dump.rdb"
+file: "dump.rdb — thứ tự đọc từ trên xuống, không theo tỷ lệ byte" {
+  grid-columns: 1
+  magic: "1. Magic string: REDIS — 5 byte"
+  version: "2. RDB version: 0011 — 4 byte\nGiá trị version chỉ là ví dụ"
+  aux: "3. AUX fields — metadata\nredis-ver / redis-bits / ctime"
+  select0: "4. SELECTDB 0 — database index"
+  resize: "5. RESIZEDB — hint số key và key có TTL\nGiúp pre-allocation"
+  entries: "6. Lặp các key/value records" {
+    grid-columns: 4
+    expire: "expire?\nTTL tuyệt đối nếu có"
+    value_type: "type\nKiểu serialized value"
+    key_bytes: key
+    value_bytes: value
+  }
+  select1: "7. SELECTDB tiếp theo + records\nNếu có nhiều database"
+  eof: "8. EOF — opcode kết thúc dataset"
+  checksum: "9. CRC64 — 8 byte checksum\nKiểm tra phần dữ liệu trước checksum"
+}
 ```
 
 Vài điểm đáng nhớ:
 
-- **Type byte** cho biết value là string/list/set/hash/zset/stream và **encoding** cụ thể (ví dụ listpack, intset, skiplist). RDB lưu đúng encoding gọn nhất → file nhỏ.
+- **Type byte** xác định kiểu value được serialized trong RDB, gồm các định dạng compact tùy type/version. Đây không phải bản copy nguyên xi layout RAM: ví dụ một ZSet có skiplist trong memory không có nghĩa RDB lưu nguyên các pointer của skiplist.
 - **Value được nén LZF** (nếu `rdbcompression yes`) — thuật toán nén nhanh, nhẹ CPU.
 - **CRC64 checksum** ở cuối file: khi load, Redis kiểm tra để phát hiện file hỏng. Nếu `rdbchecksum no` thì checksum = 0 và bỏ qua kiểm tra (nhanh hơn tí, rủi ro hơn nhiều).
 - Redis lưu cả **TTL tuyệt đối** (Unix timestamp ms) cho key có expire, nên restart xong key vẫn nhớ hạn của mình.
@@ -299,11 +324,11 @@ save 60 10000     # sau 60s  (1 phút)  nếu có ÍT NHẤT 10000 key đổi
 
 Logic là **OR**: chỉ cần một dòng thoả điều kiện là `BGSAVE` chạy. Ý tưởng: dataset đổi càng nhiều thì chụp càng thường xuyên.
 
-```diagram
-Đổi nhiều (10k+ key/phút) ──▶ snapshot mỗi 60s  (mất tối đa ~1 phút)
-Đổi vừa   (100+ key/5phút) ──▶ snapshot mỗi 300s (mất tối đa ~5 phút)
-Đổi ít    (1+ key/15phút)  ──▶ snapshot mỗi 900s (mất tối đa ~15 phút)
-```
+| Save point minh họa | Khi đủ điều kiện | Ý nghĩa RPO |
+| --- | --- | --- |
+| `save 60 10000` | ≥ 10.000 thay đổi và đủ 60 giây | Nhắm khoảng 1 phút, không phải deadline cứng |
+| `save 300 100` | ≥ 100 thay đổi và đủ 300 giây | Nhắm khoảng 5 phút |
+| `save 900 1` | ≥ 1 thay đổi và đủ 900 giây | Nhắm khoảng 15 phút |
 
 Tắt hoàn toàn RDB tự động:
 
@@ -339,15 +364,12 @@ CONFIG REWRITE                       # ghi lại vào redis.conf cho bền
 
 `BGSAVE` không chỉ chạy theo save point. Có nhiều trigger:
 
-```diagram
-BGSAVE được kích hoạt khi:
-├─ save point thoả điều kiện (giây + số thay đổi)
-├─ chạy tay: BGSAVE
-├─ SHUTDOWN (mặc định lưu RDB trước khi tắt, nếu có save point)
-├─ replica kết nối lần đầu → master fork RDB để full sync
-├─ DEBUG RELOAD (test)
-└─ FLUSHALL với option (một số bản)
-```
+| Tình huống | Cách tạo RDB |
+|---|---|
+| Save point đủ điều kiện | Redis có thể lên lịch BGSAVE |
+| Chạy tay `BGSAVE` | Fork child ghi snapshot nền |
+| Replica cần full sync | Primary có thể tạo RDB để bootstrap replica |
+| `SHUTDOWN` có lưu, `DEBUG RELOAD`, một số hành vi `FLUSHALL` | Có thể tạo/lưu RDB tùy command, options và phiên bản; **không phải mọi trường hợp đều chạy BGSAVE nền** |
 
 Vài lưu ý vận hành:
 
@@ -359,7 +381,9 @@ Vài lưu ý vận hành:
 INFO persistence
 ```
 
-```diagram
+<!-- diagram-text: Output INFO persistence minh họa, không phải sơ đồ. -->
+
+```text
 # INFO persistence — các field RDB quan trọng
 rdb_bgsave_in_progress:0            # đang BGSAVE không
 rdb_last_bgsave_status:ok           # lần cuối thành công?
@@ -377,24 +401,34 @@ rdb_last_cow_size:52428800          # RAM copy-on-write lần cuối
 
 Khi Redis start, quy trình load rất đơn giản — và đây là lý do RDB restart nhanh:
 
-```diagram
-Redis khởi động
-   │
-   ├─ AOF bật? ──── Có ──▶ load từ AOF (ưu tiên, xem [AOF])
-   │                        (vì AOF thường mới hơn)
-   └─ AOF tắt? ──── ▶ tìm dump.rdb trong `dir`
-                         │
-                         ├─ có file → kiểm CRC → load thẳng binary vào RAM
-                         │             (nhanh: không replay lệnh, dựng cấu trúc trực tiếp)
-                         └─ không có → khởi động với dataset rỗng
+```d2 title="Recovery từ RDB khi không bật AOF"
+direction: down
+start: "Redis khởi động"
+aof: "AOF bật?" {shape: diamond}
+load_aof: "Load từ nguồn AOF\nƯu tiên khi bật"
+find: "Tìm dump.rdb trong dir"
+exists: "Có file?" {shape: diamond}
+verify: "Kiểm tra format / CRC\nNếu checksum được bật"
+load: "Load binary và dựng\ndata structures trong RAM"
+empty: "Dataset rỗng"
+error: "Dừng load và báo lỗi\nKhông âm thầm bỏ corruption"
+start -> aof
+aof -> load_aof: "Có"
+aof -> find: "Không"
+find -> exists
+exists -> verify: "Có"
+verify -> load: "Hợp lệ"
+verify -> error: "Hỏng"
+exists -> empty: "Không"
 ```
 
 Điểm mấu chốt: RDB load nhanh vì nó **dựng thẳng cấu trúc dữ liệu từ binary** theo đúng encoding đã lưu, không phải "diễn lại" hàng triệu lệnh như [AOF](./aof.md).
 
-```diagram
-RDB load 10GB:  đọc binary → build cấu trúc → xong    (nhanh)
-AOF load tương đương: replay hàng triệu lệnh SET/INCR (chậm hơn nhiều)
-```
+| Nguồn | Cách phục hồi dataset tương đương |
+| --- | --- |
+| RDB | Đọc binary và dựng data structures trực tiếp |
+| AOF toàn RESP | Replay nhiều lệnh; thường chậm hơn nếu log lớn |
+| AOF có base RDB | Load base binary rồi replay phần incremental |
 
 > [!IMPORTANT]
 > Nếu bật cả RDB và AOF, khi khởi động Redis **ưu tiên load AOF** vì AOF thường phản ánh trạng thái mới nhất. RDB lúc này đóng vai backup/nền cho replication. Chi tiết phối hợp: [Persistence Strategies](./persistence-strategies.md).
@@ -433,10 +467,15 @@ Tiến trình con serialize + nén (LZF) + ghi đĩa. Với dataset lớn, đây
 
 `fork()` phải copy page table tỉ lệ với **số trang**, tức tỉ lệ với dataset size. Dataset càng lớn, `fork` càng lâu, main thread bị "đóng băng" càng lâu tại đúng thời điểm đó.
 
-```diagram
-Dataset size ──▶ page table size ──▶ thời gian fork ──▶ latency spike
-   1GB               nhỏ                  ~vài ms            khó thấy
-   50GB              lớn                   ~vài trăm ms       p99 nhảy vọt
+```d2 title="Dataset lớn làm fork có thể gây latency spike"
+direction: right
+n0: "Dataset lớn hơn"
+n1: "Page table thường lớn hơn"
+n2: "fork() có thể lâu hơn\nPhụ thuộc OS và workload"
+n3: "Main thread pause lâu hơn\nP99 có thể tăng"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 | Chi phí | Nguồn gốc | Cách giảm |
@@ -495,11 +534,19 @@ Nhanh hơn nhiều so với replay từng lệnh — chỉ copy một file binar
 
 Khi thêm replica mới vào [Replication](./replication.md):
 
-```diagram
-Replica mới kết nối
-   │
-   ▼
-Master BGSAVE ──▶ RDB ──stream──▶ Replica load RDB ──▶ nhận buffer lệnh mới ──▶ đồng bộ
+```d2 title="RDB bootstrap cho full sync"
+direction: right
+n0: "Replica mới cần full sync"
+n1: "Master tạo snapshot RDB\nCó thể qua BGSAVE"
+n2: "Stream RDB tới replica"
+n3: "Replica load RDB"
+n4: "Apply write được buffer"
+n5: "Theo replication stream mới"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
+n4 -> n5
 ```
 
 Chính RDB là phương tiện chuyển "trạng thái đầy đủ" từ master sang replica. Nếu master không `fork`/ghi RDB được (thiếu RAM, đĩa đầy), replica không lên được.
@@ -520,13 +567,16 @@ BGSAVE
 
 ### 12.2 Redis dùng >70% RAM máy khi bật RDB write-heavy
 
-```diagram
-❌ Redis 14GB / máy 16GB + write-heavy
-   → BGSAVE fork + CoW copy nhiều trang
-   → RAM vượt 16GB → OOM killer giết Redis
-
-✅ Redis 8GB / máy 16GB
-   → còn dư cho CoW → an toàn
+```d2 title="CoW có thể vượt RAM nếu không chừa headroom"
+direction: right
+tight: "Redis 14 GB / máy 16 GB\nWrite-heavy"
+cow: "BGSAVE fork\nNhiều trang CoW"
+oom: "Có thể vượt 16 GB\nOOM killer"
+headroom: "Ví dụ Redis 8 GB / máy 16 GB"
+budget: "Dư địa cho CoW / buffers / OS\nVẫn cần đo peak thực tế"
+tight -> cow
+cow -> oom
+headroom -> budget
 ```
 
 ### 12.3 Coi RDB là "không bao giờ mất dữ liệu"
@@ -573,11 +623,11 @@ Nếu snapshot gần nhất bị hỏng/rỗng (do một sự cố ghi) và bạ
 | Độ bền | Thấp hơn | Cao hơn |
 | Backup/clone | Lý tưởng (1 file) | Cồng kềnh hơn |
 
-```diagram
-Cần restart nhanh + backup gọn, chịu được mất vài phút? ─▶ RDB
-Cần độ bền cao, mất tối đa ~1s?                          ─▶ AOF
-Muốn cả hai (khuyến nghị nhiều production)?              ─▶ RDB + AOF
-```
+| Yêu cầu | Cân nhắc |
+| --- | --- |
+| Restart nhanh, backup gọn, chấp nhận mất theo snapshot | RDB |
+| Cửa sổ mất nhỏ hơn, khoảng 1 giây trong điều kiện thông thường | AOF `everysec` |
+| Kết hợp AOF recovery và snapshot backup | RDB + AOF; vẫn cần off-site và test restore |
 
 > [!TIP]
 > Chúng **không loại trừ nhau**. Cấu hình phổ biến nhất cho production quan trọng: bật cả RDB (backup nhanh, replication) lẫn AOF (độ bền). Redis ưu tiên AOF khi khởi động, RDB làm nền. Xem [Persistence Strategies](./persistence-strategies.md).
@@ -607,19 +657,14 @@ Muốn cả hai (khuyến nghị nhiều production)?              ─▶ RDB + 
 
 ## 15. Tóm tắt / Cheat sheet
 
-```diagram
-┌─────────────────────── Redis RDB cheat sheet ───────────────────────┐
-│ RDB = snapshot toàn bộ dataset ra 1 file binary nén                 │
-│ BGSAVE = fork nền (LUÔN dùng)   SAVE = blocking (TRÁNH)             │
-│ fork() không copy RAM — Copy-on-Write copy trang khi bị ghi        │
-│ Write-heavy khi BGSAVE → RAM phình → giữ dùng <50-60% RAM máy      │
-│ Mất dữ liệu = khoảng cách giữa 2 snapshot (phút)                    │
-│ Restart NHANH vì load thẳng binary, không replay lệnh              │
-│ save 900 1 / 300 100 / 60 10000 → đổi càng nhiều, chụp càng dày    │
-│ Verify: redis-check-rdb   Trạng thái: INFO persistence            │
-│ Tắt THP. Giám sát rdb_last_bgsave_status.                          │
-└─────────────────────────────────────────────────────────────────────┘
-```
+- RDB là snapshot binary của dataset; có thể nén value phù hợp.
+- Dùng BGSAVE cho snapshot nền; SAVE chặn main thread. Fork vẫn có thể gây pause.
+- Fork chia sẻ pages trước; CoW copy trang khi bị ghi.
+- Write-heavy có thể làm RAM tăng mạnh: đo peak và chừa headroom, đừng áp một tỷ lệ cố định cho mọi workload.
+- Cửa sổ mất dữ liệu tính từ snapshot thành công gần nhất; save point không là bảo đảm RPO cứng.
+- Load binary thường nhanh hơn replay log RESP lớn.
+- Kiểm tra với `redis-check-rdb`, giám sát `INFO persistence` và status lần lưu cuối.
+- Tắt THP theo khuyến nghị Redis và diễn tập restore.
 
 3 nguyên tắc nhớ lâu:
 

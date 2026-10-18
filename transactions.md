@@ -410,11 +410,16 @@ Watched key bị dirty khi bị modification bởi:
 
 ### 8.1. ABA problem
 
-```text
-WATCH key khi value=A
-client khác SET key B
-client khác SET key A
-EXEC vẫn abort vì key đã bị modify, dù value cuối lại là A
+```d2 title="WATCH phát hiện thay đổi kể cả giá trị quay lại A"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis"
+b: "Client B"
+a -> r: "WATCH key khi value=A"
+b -> r: "SET key B"
+b -> r: "SET key A"
+a -> r: "MULTI … EXEC"
+r -> a: "Abort — key đã bị modify\nDù value cuối lại là A"
 ```
 
 Điều này tốt cho optimistic concurrency: Redis theo modification, không chỉ so value cuối.
@@ -441,9 +446,16 @@ Watch gắn connection, không gắn logical request. Nếu cancellation xảy r
 
 ### 9.1. Pipeline không phải transaction
 
-```text
-Pipeline của A: SET x, SET y
-Redis có thể xử lý: A.SET x → B.GET x → A.SET y
+```d2 title="Pipeline có thể bị client khác xen command"
+shape: sequence_diagram
+a: "Client A"
+r: "Redis"
+b: "Client B"
+a -> r: "Pipeline: SET x; SET y"
+r."Execute A.SET x"
+b -> r: "GET x"
+r -> b: "Giá trị sau SET x"
+r."Execute A.SET y"
 ```
 
 Pipeline tối ưu network, không guarantee isolation giữa commands.
@@ -540,10 +552,15 @@ Redis ghi effects của transaction vào AOF theo cách giữ batch liền nhau;
 
 Transaction effects được propagate theo thứ tự đến replicas, nhưng replication mặc định asynchronous:
 
-```text
-primary EXEC thành công → response client
-primary chết trước khi replica nhận transaction
-replica promote → transaction có thể mất
+```d2 title="Transaction atomic vẫn có thể mất sau failover"
+shape: sequence_diagram
+c: "Client"
+p: "Primary"
+r: "Replica"
+c -> p: "EXEC"
+p -> c: "Transaction thành công"
+p."Chết trước khi replica nhận transaction"
+r."Promote\nTransaction có thể mất"
 ```
 
 `WAIT` có thể chờ replica acknowledge sau write nhưng tăng latency và không biến Redis thành distributed transaction consensus tuyệt đối. Xem [Replication](./replication.md) và [Persistence Strategies](./persistence-strategies.md).
@@ -554,9 +571,16 @@ Không đọc replica ngay sau transaction và kỳ vọng read-your-write nếu
 
 ### 12.4. Transaction không bao phủ external side effect
 
-```text
-MULTI/EXEC ghi Redis thành công
-→ gọi payment API thất bại
+```d2 title="Redis transaction không bao phủ payment API bên ngoài"
+shape: sequence_diagram
+a: "Application"
+r: "Redis"
+payment: "Payment API"
+a -> r: "MULTI … EXEC"
+r -> a: "Ghi Redis thành công"
+a -> payment: "Gọi payment API"
+payment -> a: "Thất bại"
+r."Redis không tự rollback\nVì API bên ngoài thất bại"
 ```
 
 Redis không rollback vì external API. Dùng outbox/state machine/idempotency, không giữ “transaction Redis” mở trong lúc network call; commands chỉ queue và external call không nằm trong atomic boundary.
@@ -600,9 +624,13 @@ EXEC
 
 Lua thường phù hợp hơn `WATCH`:
 
-```text
-nếu result:<requestId> tồn tại → trả result cũ
-ngược lại apply mutation + lưu result với TTL
+```d2 title="Idempotency record phải được check và ghi atomically"
+direction: down
+check: "result:<requestId> tồn tại?" {shape: diamond}
+old: "Trả result cũ"
+apply: "Apply mutation\nvà lưu result với TTL\nTrong cùng atomic operation"
+check -> old: "Có"
+check -> apply: "Không"
 ```
 
 Toàn bộ check + mutation + result atomically, chống ambiguous client retry tốt hơn.

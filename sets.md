@@ -47,20 +47,17 @@ Set là **tập hợp không thứ tự các string duy nhất**. Không có ind
 - **Cardinality**: số lượng member trong Set; `SCARD` O(1)
 - **Set algebra**: giao/hợp/hiệu trên server (`SINTER`, `SUNION`, `SDIFF`)
 
-```diagram
-Request path: "user 42 đã thấy event chưa?"
-
-Client
-  │
-  │ SADD seen:2026-07-07 evt_abc
-  ▼
-Redis Set
-  ├─ evt_001
-  ├─ evt_abc  ← nếu chưa có: thêm và trả 1
-  └─ evt_xyz     nếu đã có: không thêm và trả 0
-  │
-  ▼
-App quyết định xử lý/skip mà không cần SISMEMBER trước
+```d2 title="SADD vừa kiểm tra membership vừa thêm atomically"
+direction: down
+client: "Client\nSADD seen:2026-07-07 evt_abc"
+set: "Redis Set\nevt_001 / evt_abc / evt_xyz"
+new: "Member chưa tồn tại?" {shape: diamond}
+add: "Thêm và trả 1\nApp xử lý"
+skip: "Không thêm, trả 0\nApp skip"
+client -> set
+set -> new
+new -> add: "Có"
+new -> skip: "Không"
 ```
 
 Ví dụ trực quan:
@@ -117,31 +114,26 @@ set-max-listpack-value 64         # bytes, Redis 7.2+
 
 `intset` đáng quan tâm khi Set của bạn chỉ chứa ID số: Redis có thể nén chúng thành một mảng gọn, giống cất số ghế trong danh sách đã sắp xếp thay vì mỗi số một object riêng.
 
-```diagram
-SADD nums 10 3 7
-
-Bước 1: Redis thấy tất cả là integer
-Bước 2: lưu dạng intset sorted
-
-intset<int16>
-  len=3
-  contents=[3, 7, 10]
-
-SISMEMBER nums 7
-  → binary search trong [3, 7, 10]
+```d2 title="intset dùng mảng integer sorted và binary search"
+direction: right
+n0: "SADD nums 10 3 7"
+n1: "Tất cả member là integer"
+n2: "intset<int16>\nlen=3\ncontents=[3, 7, 10]"
+n3: "SISMEMBER nums 7\nBinary search trong mảng sorted"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Cơ chế bên trong có một chi tiết rất đáng nhớ: nó bắt đầu bằng integer width nhỏ nhất (`int16`), rồi upgrade khi gặp số lớn hơn.
 
-```diagram
-contents=[1, 2, 30000]          → int16 đủ chứa
-SADD nums 100000                → cần int32
-Redis allocate mảng int32 mới
-copy + convert toàn bộ phần tử
-contents=[1, 2, 30000, 100000]  → int32
-
-Sau đó SREM 100000?
-Không downgrade về int16.
+```d2 mode=steps title="intset nâng độ rộng khi thêm integer lớn"
+set: "intset<int16>\ncontents=[1, 2, 30000]"
+steps: {
+  upgrade: { set: "SADD nums 100000\nCần int32: allocate mảng mới\nCopy và convert toàn bộ phần tử" }
+  upgraded: { set: "intset<int32>\n[1, 2, 30000, 100000]" }
+  removed: { set: "SREM nums 100000\n[1, 2, 30000]\nKhông downgrade về int16" }
+}
 ```
 
 > [!IMPORTANT]
@@ -176,17 +168,17 @@ OBJECT ENCODING colors
 
 Khi Set lớn, Redis dùng dictionary. Với Set, member chính là key trong dict; value không cần nên để `NULL`.
 
-```diagram
-Set key = followers:alice
-Redis object encoding = hashtable
-
-Dict table
-  bucket 18 → "bob"   -> NULL
-  bucket 44 → "carol" -> NULL
-  bucket 91 → "dave"  -> NULL
-
-SISMEMBER followers:alice carol
-  hash("carol") → bucket 44 → compare key → found
+```d2 title="Set hashtable lưu member ở key, value là NULL"
+direction: right
+set: "followers:alice — hashtable" {
+  b18: "Bucket 18: bob → NULL"
+  b44: "Bucket 44: carol → NULL"
+  b91: "Bucket 91: dave → NULL"
+}
+query: "SISMEMBER followers:alice carol"
+hash: "hash(carol) → bucket 44"
+compare: "Compare key → found"
+query -> hash -> set.b44 -> compare
 ```
 
 Trung bình membership O(1), nhưng memory gồm hash table array, dict entry, SDS string, allocator overhead. Đó là lý do 512 `int64` trong `intset` chỉ khoảng **4KB payload**, còn hashtable có thể lớn hơn nhiều lần.
@@ -246,21 +238,17 @@ SDIFF  skill:redis skill:java    # alice
 
 Redis documentation mô tả complexity `SINTER` là **O(N*M)**, trong đó N là cardinality của set nhỏ nhất, M là số set. Điều này không phải ngẫu nhiên: Redis drive thuật toán bằng set nhỏ nhất.
 
-```diagram
-SINTER tag:redis tag:backend tag:hot
-
-Sizes:
-  tag:redis   = 1,000,000
-  tag:backend =   800,000
-  tag:hot     =       120  ← nhỏ nhất
-
-Algorithm:
-  1. Sort input sets theo cardinality tăng dần
-  2. Iterate 120 member của tag:hot
-  3. Với mỗi member, SISMEMBER trong tag:backend và tag:redis
-  4. Nếu có mặt ở tất cả → đưa vào kết quả
-
-Work ≈ 120 × 2 membership checks, không phải scan 1.8 triệu member.
+```d2 title="SINTER bắt đầu từ input có ít member nhất"
+direction: right
+n0: "Input sizes\ntag:redis=1.000.000\ntag:backend=800.000\ntag:hot=120"
+n1: "Chọn tag:hot — nhỏ nhất"
+n2: "Duyệt 120 members"
+n3: "Mỗi member: kiểm membership\ntrong backend và redis"
+n4: "Có ở cả hai → thêm kết quả\nKhoảng 120 × 2 checks"
+n0 -> n1
+n1 -> n2
+n2 -> n3
+n3 -> n4
 ```
 
 | Phép | Complexity | Server làm gì | Khi nào nguy hiểm |
@@ -349,12 +337,18 @@ SSCAN followers:famous 0 COUNT 1000
 
 **Cursor ≠ offset pagination.** Redis encode vị trí trong **hash table** (bucket index + trạng thái rehash), không phải “bỏ qua N phần tử”:
 
-```text
-Set (hashtable) buckets:  [0][1][2]...[1023]
-SSCAN cursor=0 COUNT 1000
-  → walk một dải bucket, trả member gặp được
-  → cursor = “bucket tiếp theo cần quét” (mã hóa opaque)
-  → lặp tới cursor=0 (đã đi hết vòng)
+```d2 title="SSCAN lặp theo opaque cursor, không phải offset ổn định"
+direction: down
+start: "SSCAN cursor=0 COUNT 1000"
+walk: "Duyệt một phần hash table\nTrả members và cursor mới"
+done: "Cursor trả về =0?" {shape: diamond}
+next: "Gọi SSCAN với cursor mới\nKhông giải mã như offset"
+end: "Kết thúc full iteration"
+start -> walk
+walk -> done
+done -> end: "Có"
+done -> next: "Không"
+next -> walk
 ```
 
 | Tính chất | Ý nghĩa thực tế |
@@ -385,14 +379,10 @@ Các số dưới đây là benchmark minh họa trên máy dev phổ thông (Re
 
 Memory trực giác:
 
-```diagram
-512 số int64 trong intset
-  header + 512 × 8 bytes ≈ hơn 4KB payload
-
-512 string trong hashtable
-  dictEntry pointers + hash table bucket + SDS string + allocator overhead
-  → thường lớn hơn nhiều lần, đổi lại lookup O(1) cho set lớn
-```
+| 512 phần tử | Ước lượng chi phí |
+| --- | --- |
+| intset với số int64 | Header + 512 × 8 byte, hơn 4 KB payload |
+| hashtable với String member | dict entries, bucket array, SDS và allocator overhead; thường lớn hơn nhiều, đổi lại lookup kỳ vọng O(1) |
 
 > [!CAUTION]
 > Lệnh O(N) + reply khổng lồ **block event loop** — request khác xếp hàng phía sau ([Redis Architecture](./redis-architecture.md)).
@@ -469,14 +459,12 @@ SDIFF  following:carol following:alice # gợi ý
 
 Celebrity problem:
 
-```diagram
-followers:normal_user  ≈ 200 members
-followers:celebrity    ≈ 10,000,000 members
-
-SCARD followers:celebrity      ✅ O(1)
-SSCAN followers:celebrity      ✅ batch được
-SMEMBERS followers:celebrity   ❌ big reply + block + migrate slot chậm
-```
+| Trường hợp | Lựa chọn |
+| --- | --- |
+| User thường ~200 followers | Set nhỏ, đo encoding và memory |
+| Celebrity ~10 triệu followers: chỉ đếm | `SCARD` — O(1) |
+| Celebrity: duyệt theo batch | `SSCAN`, không giả định snapshot hay số phần tử cố định |
+| Celebrity: `SMEMBERS` toàn bộ | Tránh response khổng lồ, block và ảnh hưởng migrate slot |
 
 Hướng xử lý thực tế:
 

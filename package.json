@@ -6,9 +6,10 @@
     "prepare-content": "node scripts/prepare-content.mjs",
     "typecheck": "tsc --noEmit",
     "test:browser": "playwright test",
+    "test:docs": "node --test tests/diagram-audit.test.mjs && node scripts/audit-diagrams.mjs",
     "predev": "node scripts/prepare-content.mjs",
     "dev": "next dev",
-    "prebuild": "node scripts/prepare-content.mjs",
+    "prebuild": "npm run test:docs && node scripts/prepare-content.mjs",
     "build": "next build",
     "preview": "wrangler pages dev dist",
     "deploy": "npm run build && npx wrangler pages deploy dist"
@@ -31,8 +32,10 @@
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "remark-parse": "^11.0.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "unified": "^11.0.5"
   },
   "overrides": {
     "postcss": "8.5.23",

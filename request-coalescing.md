@@ -26,10 +26,10 @@ Request Coalescing là cơ chế **gom những lời gọi đồng thời cho c�
 
 Ví dụ, 100 request cùng cần dữ liệu sản phẩm `product:42` khi cache chưa có giá trị. Thay vì mỗi request tự query database, một lời gọi thực hiện fetch; những lời gọi còn lại chờ và nhận chung kết quả. Database hoặc API được gọi phía sau được gọi là **downstream**.
 
-```text
-Không coalescing: 100 cache miss cùng key → 100 downstream fetch
-Có coalescing:    100 cache miss cùng key → 1 fetch chung + 99 caller chờ
-```
+| Cùng 100 cache miss một key | Origin fetch |
+| --- | --- |
+| Không coalescing | Có thể 100 lần |
+| Có coalescing trong cùng scope | 1 shared fetch +99 caller chờ |
 
 Trường hợp một fetch là kết quả lý tưởng khi các request cùng key tham gia trong lúc công việc chung còn chạy và thuộc cùng phạm vi điều phối. Nếu mỗi process chỉ gom request của riêng nó, cả cụm server vẫn có thể tạo nhiều fetch cho cùng key.
 
@@ -107,11 +107,13 @@ S -> B: "Cùng kết quả Product" { style.stroke-dash: 4 }
 
 Trong một process, cấu trúc thường dùng là:
 
-```text
-ConcurrentHashMap<String, CompletableFuture<Result>>
-
-product:42 → CompletableFuture đang fetch sản phẩm 42
-product:99 → CompletableFuture đang fetch sản phẩm 99
+```d2 title="Map singleflight ánh xạ key sang shared future"
+direction: down
+map: "ConcurrentHashMap<String,\nCompletableFuture<Result>>"
+p42: "product:42\nFuture đang fetch sản phẩm 42"
+p99: "product:99\nFuture đang fetch sản phẩm 99"
+map -> p42
+map -> p99
 ```
 
 ### Singleflight và cache làm hai việc khác nhau
@@ -160,19 +162,28 @@ Vì vậy, **trở thành leader chỉ có nghĩa là chưa có công việc chu
 
 Giả sử A vừa nhận dữ liệu từ DB nhưng chưa ghi Redis. Nếu A đã xóa đăng ký khỏi map lúc này, request B có thể thấy cả hai nơi đều trống:
 
-```text
-Redis: chưa có dữ liệu sản phẩm 42
-Map:   không có ai đang lấy sản phẩm 42
-→ B mở một công việc mới và gọi DB lần nữa.
+```d2 title="Dọn singleflight quá sớm mở cửa cho duplicate fetch"
+direction: right
+n0: "Redis chưa có product:42"
+n1: "Map singleflight đã xóa đăng ký"
+n2: "Request B thấy cả cache miss\nvà không có công việc in-flight"
+n3: "B mở công việc mới\nFetch DB thêm lần nữa"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Để tránh khoảng hở này, ví dụ Java trong tài liệu dùng thứ tự:
 
-```text
-1. Lấy dữ liệu từ DB.
-2. Thử ghi dữ liệu vào Redis, với timeout tại Redis client.
-3. Xóa đăng ký công việc khỏi map Java.
-4. Hoàn tất CompletableFuture để các caller nhận kết quả.
+```d2 title="Publish cache trước khi gỡ đăng ký singleflight"
+direction: right
+n0: "1. Lấy dữ liệu từ DB"
+n1: "2. Thử ghi Redis\nCó timeout tại client"
+n2: "3. Xóa đăng ký khỏi map Java"
+n3: "4. Hoàn tất CompletableFuture\nCác caller nhận kết quả"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Sau bước 3, request mới có thể mở nhóm mới, nhưng lần GET lại sẽ thấy dữ liệu đã ghi ở bước 2 và tránh gọi DB. Các caller cũ vẫn giữ future của nhóm cũ nên vẫn nhận được kết quả ở bước 4; xóa khỏi map không hủy future đó.
@@ -823,13 +834,13 @@ Coalescing giảm tải nhưng khi cache trống, mọi waiter vẫn phải ch�
 
 Ví dụ từ thời điểm fetch thành công:
 
-```text
-Tuổi bản cache:  0 giây           30 giây                   300 giây
-                ├─────────────────┼──────────────────────────┤
-                │      Fresh      │          Stale           │ Hết hạn
-                │   trả ngay      │ trả cũ + refresh chung   │ chờ/error
-                                  ↑                          ↑
-                               Soft TTL                   Hard TTL
+```d2 title="Soft TTL và hard TTL chia ba trạng thái phục vụ"
+group: "Tuổi cache minh họa — các ô không theo tỷ lệ thời gian" {
+  grid-columns: 3
+  n0: "0 ≤ tuổi <30 giây\nFresh\nTrả ngay"
+  n1: "30 ≤ tuổi <300 giây\nStale\nTrả cũ hợp lệ + refresh chung"
+  n2: "Tuổi ≥300 giây\nHard TTL hết\nChờ refill hoặc error theo policy"
+}
 ```
 
 Trong tài liệu này, soft TTL là 30 giây và hard TTL là **300 giây tính từ cùng thời điểm fetch**, không phải 30 + 300 giây. Cửa sổ stale dài 270 giây.
@@ -909,13 +920,11 @@ Nếu 100 request cần 100 key khác nhau, coalescing gần như không giúp. 
 
 Một tổ hợp thực tế cho dữ liệu đọc nhiều, chấp nhận cũ trong khoảng ngắn:
 
-```text
-Cache-aside
-  + local singleflight
-  + fleet lease nếu duplicate xuyên process đáng kể
-  + soft/hard TTL nếu nghiệp vụ cho phép
-  + giới hạn concurrency và deadline
-```
+- Cache-aside.
+- Thêm local singleflight để gom trong process.
+- Thêm fleet lease nếu duplicate xuyên process đáng kể.
+- Dùng soft/hard TTL nếu business chấp nhận stale.
+- Luôn giới hạn concurrency và deadline.
 
 Không cần triển khai tất cả ngay từ đầu. Chọn kỹ thuật theo bottleneck đã đo được.
 

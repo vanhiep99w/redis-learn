@@ -98,13 +98,10 @@ Các command đọc thường vẫn chạy, nhưng command ghi hoặc command c�
 
 ### `allkeys-*` vs `volatile-*`
 
-```text
-allkeys-lru
-  Xem toàn bộ keyspace là cache, key nào cũng có thể bị xóa.
-
-volatile-lru
-  Chỉ xóa key có TTL. Key không TTL không bị eviction.
-```
+| Policy | Candidate keys |
+| --- | --- |
+| `allkeys-lru` | Toàn keyspace, key nào cũng có thể bị evict |
+| `volatile-lru` | Chỉ key có TTL; key không TTL không bị xét |
 
 Nếu dùng `volatile-*` nhưng phần lớn key không có TTL, Redis có thể không tìm được key để xóa và trả OOM, dù trong database có rất nhiều key.
 
@@ -117,13 +114,14 @@ Nếu dùng `volatile-*` nhưng phần lớn key không có TTL, Redis có thể
 
 LRU = Least Recently Used. Ý tưởng: key lâu không được truy cập thì ít có khả năng cần trong tương lai.
 
-```text
-Truy cập gần đây hơn  ─────────────────────────▶
-key A   key B   key C   key D
-^                         ^
-ít recent                recent
-
-Khi cần evict: ưu tiên key A
+```d2 title="LRU ưu tiên key ít recent trong ví dụ"
+group: "Truy cập gần đây tăng từ trái sang phải" {
+  grid-columns: 4
+  n0: "Key A\nÍt recent nhất\nƯu tiên evict"
+  n1: "Key B"
+  n2: "Key C"
+  n3: "Key D\nRecent nhất"
+}
 ```
 
 ### Redis dùng approximate LRU
@@ -162,11 +160,15 @@ Ví dụ:
 
 LRU có thể bị “pollution” bởi scan workload:
 
-```text
-Cache đang có hot keys: A, B, C
-Một batch job đọc tuần tự 1 triệu key hiếm dùng
-LRU metadata bị cập nhật bởi dữ liệu chỉ đọc một lần
-Hot keys có thể bị đẩy ra nếu cache nhỏ
+```d2 title="Scan pollution có thể đẩy hot keys ra khỏi LRU cache"
+direction: right
+n0: "Cache có hot keys A, B, C"
+n1: "Batch job đọc tuần tự\n1 triệu key hiếm dùng"
+n2: "LRU metadata cập nhật\nbởi các key chỉ đọc một lần"
+n3: "Nếu cache nhỏ\nHot keys có thể bị evict"
+n0 -> n1
+n1 -> n2
+n2 -> n3
 ```
 
 Nếu workload có nhiều key được đọc một lần, LFU thường phù hợp hơn.
@@ -179,11 +181,11 @@ LFU = Least Frequently Used. Ý tưởng: key ít được truy cập thường 
 
 Redis LFU dùng counter xấp xỉ, không phải bộ đếm chính xác tuyệt đối. Counter tăng theo xác suất và giảm dần theo thời gian.
 
-```text
-key hot:    read nhiều lần  -> LFU counter cao
-key cold:   read ít lần     -> LFU counter thấp
-key old hot: từng hot nhưng lâu không dùng -> counter decay dần
-```
+| Key | LFU metadata |
+| --- | --- |
+| Hot: đọc nhiều | Counter cao |
+| Cold: ít đọc | Counter thấp |
+| Từng hot nhưng lâu không dùng | Counter decay dần |
 
 ### Tham số LFU
 
@@ -228,13 +230,11 @@ Nếu traffic thay đổi theo trend rất nhanh, LFU decay quá chậm có th�
 
 `volatile-ttl` chỉ xét key có TTL và xóa key có TTL còn lại ngắn nhất.
 
-```text
-key A TTL 5s
-key B TTL 60s
-key C no TTL
-
-volatile-ttl sẽ ưu tiên A; C không bị xét.
-```
+| Key | TTL | Với volatile-ttl |
+| --- | --- | --- |
+| A | 5 giây | Ưu tiên trong ví dụ |
+| B | 60 giây | TTL dài hơn |
+| C | Không TTL | Không là candidate |
 
 Policy này hợp khi TTL mang ý nghĩa business rõ: key sắp hết hạn thì ít giá trị hơn key còn sống lâu.
 
@@ -407,10 +407,10 @@ SET cache:user:1 '{...}' EX 3600
 
 Nếu queue nằm cùng Redis với cache, eviction có thể xóa message.
 
-```text
-cache:*  -> có thể evict
-queue:*  -> không được evict
-```
+| Namespace / vai trò | Yêu cầu |
+| --- | --- |
+| `cache:*` | Có thể evict nếu tái tạo được |
+| `queue:*` | Không nên mất do eviction; tách instance/policy theo durability requirement |
 
 Tách instance hoặc dùng `noeviction` cho Redis queue.
 

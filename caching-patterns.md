@@ -108,11 +108,9 @@ Hit ratio cao chưa chắc tốt. Cache 99% nhưng 1% miss tập trung vào quer
 
 ### 2.3. Ba quyết định phải viết ra
 
-```text
-1. Key: cache đại diện cho đối tượng/query nào?
-2. Freshness: TTL và invalidation là gì?
-3. Miss path: ai được phép rebuild, với timeout và concurrency bao nhiêu?
-```
+1. **Key:** cache đại diện cho đối tượng/query nào?
+2. **Freshness:** TTL và invalidation là gì?
+3. **Miss path:** ai được phép rebuild, với timeout và concurrency bao nhiêu?
 
 ---
 
@@ -199,12 +197,19 @@ Tại sao commit database trước rồi mới `DEL`? Nếu xóa trước, một
 
 Ngay cả “DB trước, DEL sau” vẫn có race hiếm:
 
-```text
-T1 Reader: cache miss
-T2 Reader: SELECT lấy value cũ
-T3 Writer: UPDATE + COMMIT value mới
-T4 Writer: DEL cache
-T5 Reader: SET value cũ vào cache  ← stale cho tới TTL
+```d2 title="Race: reader nạp lại value cũ sau invalidation"
+shape: sequence_diagram
+reader: "Reader"
+db: "Database"
+writer: "Writer"
+cache: "Redis cache"
+reader -> cache: "T1: GET → miss"
+reader -> db: "T2: SELECT lấy value cũ"
+db -> reader: "Value cũ"
+writer -> db: "T3: UPDATE và COMMIT value mới"
+writer -> cache: "T4: DEL cache"
+reader -> cache: "T5: SET value cũ"
+cache."Stale có thể tồn tại tới TTL"
 ```
 
 Các mức xử lý:
@@ -759,13 +764,19 @@ Dùng `UNLINK` thay `DEL` cho value rất lớn để giải phóng memory bất
 
 Nếu Redis chỉ là cache, application có thể bypass xuống DB. Nhưng bypass không giới hạn dễ biến Redis outage thành database outage.
 
-```text
-Redis lỗi
-  ├─ circuit breaker mở
-  ├─ giới hạn concurrent origin loads
-  ├─ rate limit / load shedding
-  ├─ local stale cache nếu an toàn
-  └─ database timeout ngắn + connection pool hữu hạn
+```d2 title="Các lớp bảo vệ origin khi Redis lỗi"
+direction: down
+fail: "Redis lỗi / timeout"
+breaker: "Circuit breaker mở"
+concurrency: "Giới hạn concurrent origin loads"
+shed: "Rate limit / load shedding"
+stale: "Local stale cache nếu an toàn"
+db: "DB timeout ngắn\nConnection pool hữu hạn"
+fail -> breaker
+fail -> concurrency
+fail -> shed
+fail -> stale
+fail -> db
 ```
 
 Không retry Redis nhiều lần trong cùng request với exponential latency. Một retry có jitter có thể hợp lý cho lỗi transient, nhưng tổng deadline phải được giữ.

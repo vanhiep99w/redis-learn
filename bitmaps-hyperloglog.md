@@ -58,10 +58,13 @@ Doc này giải thích cơ chế bên trong của cả hai (bit array, và thu�
 
 Một điểm dễ nhầm: Bitmap và HLL đều “nằm trên String” trong Redis. Nhưng ý nghĩa hoàn toàn khác:
 
-```diagram
-Redis String bytes
-├─ Bitmap: byte nào, bit nào tương ứng với user_id nào → còn truy vết được membership
-└─ HLL: bytes là registers (ô nhớ nhỏ giữ thống kê) sau khi hash → mất danh tính phần tử, chỉ còn ước lượng cardinality
+```d2 title="Cùng String bytes nhưng Bitmap và HLL có ý nghĩa khác nhau"
+direction: right
+bytes: "Redis String bytes"
+bitmap: "Bitmap\nBit offset ánh xạ user_id\nHỏi membership được"
+hll: "HyperLogLog\nRegisters thống kê sau hash\nKhông giữ danh tính phần tử"
+bytes -> bitmap
+bytes -> hll
 ```
 
 ---
@@ -75,21 +78,20 @@ SETBIT active:2026-07-07 10 1
 GETBIT active:2026-07-07 10
 ```
 
-```diagram
-Key: active:2026-07-07
+```d2 title="Bitmap: offset 10 nằm trong byte 1"
+group: "active:2026-07-07 — các byte liên tiếp" {
+  grid-columns: 4
+  n0: "Byte 0\n00000000\noffset 0–7"
+  n1: "Byte 1\n00100000\noffset 8–15\noffset 10 = bit thứ 2 (từ 0)"
+  n2: "Byte 2\n00000000\noffset 16–23"
+  n3: "…"
+}
+```
 
-byte index:      0          1          2
-             ┌────────┬────────┬────────┐
-bits:        │00000000│00100000│00000000│ ...
-             └────────┴────────┴────────┘
-bit offset:   01234567 89abcdef 01234567
-                         ▲
-                         offset 10 = byte 1, bit trong byte
-
-Công thức:
-  byte_index = floor(offset / 8)
-  bit_index  = offset % 8
-  memory     ≈ (max_offset + 1) / 8 bytes
+```text
+byte_index = floor(offset / 8)
+bit_index = offset % 8
+memory ≈ (max_offset + 1) / 8 bytes
 ```
 
 ### 3.1. Giới hạn 512MB và cái bẫy offset cao
@@ -115,16 +117,24 @@ Vì Bitmap là String, nó chịu giới hạn String tối đa **512MB**. 512MB
 
 `BITCOUNT` không đi từng bit một kiểu ngây thơ. Redis đếm theo byte/word và tận dụng kỹ thuật **population count** (popcount): CPU có instruction hoặc thuật toán word-at-a-time để đếm số bit `1` cực nhanh.
 
-```diagram
-Bitmap 12.5MB cho 100M user
-
-[64-bit word][64-bit word][64-bit word] ...
-     │            │            │
-  popcount     popcount     popcount
-     └────────────┴────────────┴──▶ cộng tổng
-
-O(N bytes), nhưng hằng số nhỏ: đọc tuần tự memory, cache-friendly.
+```d2 title="BITCOUNT cộng popcount của các word"
+direction: right
+w1: "64-bit word 1"
+w2: "64-bit word 2"
+wn: "64-bit word N"
+p1: "popcount"
+p2: "popcount"
+pn: "popcount"
+sum: "Cộng tổng\nO(N bytes), đọc tuần tự"
+w1 -> p1
+w2 -> p2
+wn -> pn
+p1 -> sum
+p2 -> sum
+pn -> sum
 ```
+
+Ví dụ bitmap 12,5 MB cho 100 triệu user: đọc tuần tự memory giúp hằng số nhỏ, nhưng vẫn O(N bytes).
 
 > [!NOTE]
 > “Nhanh” không có nghĩa “miễn phí”. `BITCOUNT` trên bitmap 512MB vẫn phải đọc 512MB. Dùng tốt cho job/dashboard; tránh đặt trong request path nóng nếu key có thể phình lớn.
@@ -189,7 +199,9 @@ BITCOUNT active:week:27
 EXPIRE active:week:27 3600
 ```
 
-```diagram
+<!-- diagram-text: Phép OR căn từng bit để so sánh operand và kết quả. -->
+
+```text
 active Mon:  10010010
 active Tue:  01010000
 active Wed:  00000110
@@ -209,7 +221,9 @@ BITCOUNT retained:d1:d7
 EXPIRE retained:d1:d7 3600
 ```
 
-```diagram
+<!-- diagram-text: Phép AND căn từng bit để so sánh operand và kết quả. -->
+
+```text
 signup D1:    11110000
 active D7:    10101010
               -------- AND
@@ -238,15 +252,19 @@ BITFIELD counters:level INCRBY u16 '#42' 1 GET u16 '#42'
 
 `#42` nghĩa là offset theo **đơn vị type**: phần tử thứ 42 của mảng `u16` = bit offset `42 * 16`. Không có `#` thì offset là bit tuyệt đối.
 
-```diagram
-BITFIELD counters:level u16
+```d2 title="BITFIELD đóng gói nhiều counter u16"
+group: "counters:level — mỗi counter chiếm 16 bit" {
+  grid-columns: 5
+  n0: "#0\n16 bit"
+  n1: "#1\n16 bit"
+  n2: "#2\n16 bit"
+  n3: "…"
+  n4: "#42\n16 bit"
+}
+```
 
-index:      #0        #1        #2              #42
-        ┌────────┬────────┬────────┬── ... ──┬────────┐
-        │ 16 bit │ 16 bit │ 16 bit │         │ 16 bit │
-        └────────┴────────┴────────┴── ... ──┴────────┘
-
-1,000,000 counters u16 = 2,000,000 bytes ≈ 2MB
+```text
+1.000.000 counters u16 × 2 byte = 2.000.000 byte ≈ 2 MB
 ```
 
 ### 6.1. Overflow: WRAP, SAT, FAIL
@@ -280,18 +298,18 @@ Tưởng tượng tung đồng xu công bằng. Nếu bạn thấy chuỗi **20 
 
 HLL thay đồng xu bằng hash bit:
 
-```diagram
-Element: "user:42"
-       │
-       ▼
-Hash 64-bit:  010011010101000000000000101101...
-              └────14 bit────┘└── phần còn lại ──┘
-                    │                 │
-                    │                 └─ đếm leading zeros/rank
-                    └─ chọn 1 trong 2^14 = 16,384 registers
-
-Register được cập nhật:
-  registers[index] = max(registers[index], rank)
+```d2 title="Hash chọn register và cập nhật thống kê HLL"
+direction: right
+user: "Element: user:42"
+hash: "Hash 64-bit"
+index: "14 bit chọn index\n1 trong 16.384 registers"
+rest: "Các bit còn lại\nTính rank từ chuỗi zero"
+update: "registers[index] =\nmax(registers[index], rank)"
+user -> hash
+hash -> index
+hash -> rest
+index -> update
+rest -> update
 ```
 
 Một hash có 18 zero liên tiếp ở phần rank là sự kiện hiếm; nếu đã thấy nó, cardinality chắc không nhỏ. Nhưng một register quá nhiễu, nên HLL dùng **16,384 registers** rồi gộp chúng bằng trung bình điều hòa (harmonic mean) + bias correction.
@@ -411,7 +429,9 @@ Merge quan trọng vì analytics thường cần đếm unique theo tuần/thán
 
 Merge HLL rất đẹp vì mỗi register giữ max rank từng thấy:
 
-```diagram
+<!-- diagram-text: Mảng register trước/sau phép max theo cùng index. -->
+
+```text
 HLL A registers: [3, 0, 5, 1, ...]
 HLL B registers: [2, 4, 1, 7, ...]
                  -------------------- max từng vị trí
@@ -460,19 +480,25 @@ Một bảng khác nhìn theo `max_id`, vì Bitmap phụ thuộc **offset lớn 
 
 Cây quyết định thực dụng:
 
-```diagram
-Bạn cần liệt kê phần tử hoặc lưu dữ liệu kèm theo?
-├─ Có  → Set / DB / Sorted Set
-└─ Không
-   Bạn cần hỏi membership exact từng user?
-   ├─ Có
-   │  ID có compact và max_id kiểm soát được?
-   │  ├─ Có  → Bitmap
-   │  └─ Không → Set hoặc tạo mapping ID → integer
-   └─ Không
-      Chỉ cần unique count analytics và chấp nhận ~1% sai?
-      ├─ Có  → HyperLogLog
-      └─ Không → Set/Bitmap exact tùy ID
+```d2 title="Chọn Set, Bitmap hay HyperLogLog"
+direction: down
+list: "Cần liệt kê phần tử\nhoặc dữ liệu kèm theo?" {shape: diamond}
+set: "Set / DB / Sorted Set"
+membership: "Cần membership exact\ntừng user?" {shape: diamond}
+compact: "ID compact và\nmax_id kiểm soát được?" {shape: diamond}
+bitmap: "Bitmap"
+mapping: "Set hoặc mapping ID → integer"
+approx: "Chỉ cần unique count\nvà chấp nhận khoảng 1% sai?" {shape: diamond}
+hll: "HyperLogLog"
+exact: "Set / Bitmap exact\ntùy miền ID"
+list -> set: "Có"
+list -> membership: "Không"
+membership -> compact: "Có"
+compact -> bitmap: "Có"
+compact -> mapping: "Không"
+membership -> approx: "Không"
+approx -> hll: "Có"
+approx -> exact: "Không"
 ```
 
 ### Khi nào KHÔNG nên dùng Bitmap
@@ -512,7 +538,9 @@ GETBIT streak:42:2026 186   # hôm qua có học không?
 GET streak:42:2026          # lấy 46 bytes về app vẽ calendar/streak
 ```
 
-```diagram
+<!-- diagram-text: Ánh xạ ngày/bit cần căn cột chính xác. -->
+
+```text
 User 42 - year 2026
 
 Day:   0 1 2 3 4 5 6 ... 186 187 188 ... 364
@@ -540,7 +568,9 @@ BITCOUNT cohort:install:w27
 EXPIRE tmp:ret:w27:w28 3600
 ```
 
-```diagram
+<!-- diagram-text: Phép AND cohort cần căn từng bit; giữ công thức retention. -->
+
+```text
 cohort install W27:  111111000000
 active W28:          101100110000
                      ------------ AND

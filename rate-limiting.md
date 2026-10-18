@@ -62,11 +62,7 @@ subject + action + rate + burst + scope + response + failure mode
 
 Ví dụ:
 
-```text
-Mỗi API key được 100 request/60 giây cho POST /search,
-burst tối đa 20, tính toàn cầu, vượt limit trả 429,
-limiter lỗi thì fail-open tối đa 30 giây nhưng có local emergency limit.
-```
+Ví dụ policy: mỗi API key được **100 request/60 giây** cho `POST /search`, burst tối đa 20, scope toàn cầu; vượt limit trả 429. Nếu limiter lỗi thì fail-open tối đa 30 giây nhưng vẫn có local emergency limit.
 
 ### 2.1. Các câu hỏi bắt buộc
 
@@ -232,10 +228,15 @@ estimated = 20 + 80 × 0,75 = 80
 
 Ưu điểm: memory O(1), mượt hơn fixed window. Nhược điểm: xấp xỉ vì giả định request bucket trước phân bố đều.
 
-```text
-previous window          current window
-[80 requests]            [20 requests ....]
-        phần overlap ────────┘
+```d2 title="Sliding counter lấy trọng số từ window trước"
+direction: right
+previous: "Previous window\n80 request"
+current: "Current window\n20 request\np=0,25"
+weighted: "Phần overlap 1−p=0,75\n80 × 0,75 =60"
+estimated: "Estimated=20+60=80\nƯớc lượng, không là exact sliding log"
+previous -> weighted
+weighted -> estimated
+current -> estimated
 ```
 
 Dùng Lua để đọc/increment các bucket atomically. Trong Cluster, hai key phải cùng slot hoặc gói hai counter vào một Hash key:
@@ -538,12 +539,14 @@ Không gắn raw user/API key vào metric label vì cardinality và PII. Log sam
 
 Inject `now` vào algorithm test:
 
-```text
-Token bucket C=3, refill=1/s
-T=0: 3 requests allowed, request 4 denied
-T=500ms: vẫn denied nếu cost=1
-T=1000ms: 1 request allowed
-T=10000ms: bucket chỉ đầy 3, không tích vô hạn
+```d2 mode=steps title="Token bucket: refill có trần capacity"
+bucket: "C=3, refill=1 token/s\ncost=1"
+steps: {
+  zero: { bucket: "T=0\n3 request allowed, request 4 denied\nCòn 0 token" }
+  half: { bucket: "T=500 ms\nChỉ có 0,5 token\nRequest cost=1 vẫn denied" }
+  second: { bucket: "T=1.000 ms\nCó thể cho 1 request" }
+  capped: { bucket: "T=10.000 ms nếu không consume thêm\nChỉ tích tối đa 3 token" }
+}
 ```
 
 Test boundary fixed/sliding, clock lùi, duplicate request ID, TTL expiry, capacity/cost invalid.

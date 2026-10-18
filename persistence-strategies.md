@@ -28,14 +28,12 @@ Bạn đã hiểu [RDB](./rdb.md) (snapshot định kỳ) và [AOF](./aof.md) (l
 
 Đây là một quyết định **kinh doanh**, không chỉ kỹ thuật. Mất 5 phút view count của một bài báo: chẳng sao. Mất 1 giao dịch trừ tiền ví: khiếu nại, hoàn tiền, mất uy tín. Cùng một Redis, hai câu trả lời khác nhau hoàn toàn.
 
-```diagram
-"Mất bao nhiêu dữ liệu là chấp nhận được?"  (RPO — Recovery Point Objective)
-   │
-   ├─ Vài phút OK        ──▶ RDB thuần
-   ├─ Tối đa ~1 giây     ──▶ AOF everysec (thường + RDB)
-   ├─ Gần như 0          ──▶ AOF always (đĩa nhanh)
-   └─ 0 tuyệt đối        ──▶ AOF + replication + backup off-site (và vẫn có giới hạn)
-```
+| RPO mục tiêu | Hướng thiết kế |
+| --- | --- |
+| Vài phút | RDB thuần |
+| Khoảng 1 giây | AOF `everysec`, thường kết hợp RDB |
+| Gần 0 sau ACK | AOF `always`, kiểm chứng fsync/storage |
+| Yêu cầu không mất dữ liệu trong failure model cụ thể | Kết hợp persistence, replication và backup; thiết kế ACK/consistency riêng. Không cấu hình Redis đơn lẻ nào bảo đảm 0 tuyệt đối trong mọi sự cố. |
 
 Doc này giúp bạn biến "mất bao nhiêu là được" thành một cấu hình cụ thể, và tránh hai sai lầm kinh điển: **trả quá nhiều hiệu năng cho độ bền không cần** (bật AOF always cho cache), hoặc **tưởng mình an toàn trong khi không** (chỉ RDB cho dữ liệu tài chính, hoặc tưởng replication là backup).
 
@@ -45,15 +43,12 @@ Doc này giúp bạn biến "mất bao nhiêu là được" thành một cấu h
 
 Mọi lựa chọn persistence nằm trên một đường căng giữa hai đầu:
 
-```diagram
-  Bền hơn ◀──────────────────────────────────────────▶ Nhanh hơn
-                                                        Nhẹ hơn
-
-  AOF always                                            no persistence
-  AOF everysec + RDB                                    RDB thưa
-       │                                                     │
-       └──────────── điểm cân bằng đa số production ─────────┘
-```
+| Ưu tiên | Lựa chọn điển hình | Đánh đổi |
+| --- | --- | --- |
+| Durability | AOF `always` | Chờ fsync, cần benchmark |
+| Cân bằng | AOF `everysec` + RDB | Có cửa sổ mất write; có snapshot để backup |
+| Ít overhead | RDB thưa | Cửa sổ mất lớn hơn |
+| Nhanh/nhẹ, warm lại được | Không persistence | Không có dữ liệu local để khôi phục sau restart |
 
 Ba đại lượng vận hành cần đặt lên bàn cân:
 
@@ -84,13 +79,10 @@ Tóm tắt lại hai cơ chế (chi tiết ở [RDB](./rdb.md) và [AOF](./aof.m
 | Đọc được bằng mắt | Không (binary) | Có (RESP text) — audit thô |
 | Nền của replication | Có (full sync — đồng bộ toàn bộ dataset cho replica) | Không trực tiếp |
 
-```diagram
-RDB tối ưu: RTO (restart nhanh) + backup gọn + overhead thấp
-            đổi lại: RPO xấu (mất vài phút)
-
-AOF tối ưu: RPO tốt (mất ~1s hoặc ~0)
-            đổi lại: file lớn, I/O liên tục, RTO chậm hơn (bản cũ)
-```
+| Cơ chế | Điểm mạnh | Đánh đổi |
+| --- | --- | --- |
+| RDB | RTO tốt: restart nhanh, backup gọn | RPO theo khoảng giữa các snapshot |
+| AOF | RPO tốt hơn theo fsync policy | I/O liên tục; log lớn có thể kéo dài RTO |
 
 Điểm mấu chốt: **hai cơ chế mạnh ở hai chỗ khác nhau và bù trừ cho nhau** → đó là lý do hybrid tồn tại (mục 5).
 
@@ -152,11 +144,12 @@ appendfsync everysec
 - **Lợi:** RPO tốt từ AOF + backup gọn/restart-nền từ RDB.
 - **Hại:** overhead cao nhất (cả hai cùng chạy), cần chừa RAM cho CoW của cả `BGSAVE` lẫn AOF rewrite.
 
-```diagram
-Không persistence ─▶ RDB thuần ─▶ AOF thuần ─▶ Hybrid
-   nhanh/rẻ           gọn/RTO tốt   RPO tốt      bền + tiện, đắt nhất
-   RPO tệ nhất        RPO trung      RTO kém hơn  overhead cao nhất
-```
+| Mức persistence | Lợi ích | Chi phí/giới hạn |
+| --- | --- | --- |
+| Không persistence | Nhanh, rẻ | RPO tệ nhất nếu không có nguồn warm |
+| RDB | Gọn, restart nhanh | RPO theo snapshot |
+| AOF | Cửa sổ mất dữ liệu nhỏ hơn | I/O và replay; tùy base/rewrite |
+| Hybrid | Kết hợp snapshot backup với AOF recovery | Thêm overhead và quy trình vận hành |
 
 ---
 
@@ -164,19 +157,13 @@ Không persistence ─▶ RDB thuần ─▶ AOF thuần ─▶ Hybrid
 
 Nhiều người nghĩ phải **chọn** RDB **hoặc** AOF. Thực tế Redis được thiết kế để chạy **cả hai cùng lúc**, và với production quan trọng đây thường là lựa chọn tốt nhất. Mỗi cái bù đúng điểm yếu của cái kia:
 
-```diagram
-                 RDB                          AOF
-        ┌──────────────────┐        ┌──────────────────┐
-Mạnh:   │ restart nhanh    │        │ RPO ~1s          │
-        │ backup 1 file    │        │ mất ít khi crash │
-        │ full sync repl   │        │                  │
-        └──────────────────┘        └──────────────────┘
-Yếu:    │ RPO vài phút     │        │ file lớn         │
-        │ mất nhiều        │        │ restart chậm hơn │
-        └────────┬─────────┘        └────────┬─────────┘
-                 │                           │
-                 └───────── HYBRID ──────────┘
-              lấy điểm mạnh của cả hai, bù điểm yếu
+```d2 title="Hybrid kết hợp các điểm mạnh của RDB và AOF"
+direction: right
+rdb: "RDB\nRestart nhanh / backup một file\nCó thể dùng cho full sync\nGiới hạn: RPO theo snapshot"
+aof: "AOF\nRPO theo fsync policy\nÍt mất write hơn khi crash\nGiới hạn: I/O / log / replay"
+hybrid: "Hybrid\nAOF cho recovery\nRDB cho snapshot backup\nVẫn cần backup off-site"
+rdb -> hybrid
+aof -> hybrid
 ```
 
 Cách hybrid hoạt động khi khởi động:
@@ -195,18 +182,20 @@ Cái giá phải trả không biến hybrid thành lựa chọn miễn phí: ove
 
 Thứ tự ưu tiên rất quan trọng để không hiểu lầm "vì sao restart ra dữ liệu cũ":
 
-```diagram
-Redis khởi động
-   │
-   ├─ appendonly yes?
-   │      │
-   │      ├─ Có → LOAD TỪ AOF  (bỏ qua RDB, vì AOF thường mới hơn)
-   │      │        ├─ (Redis 7) load base RDB trong AOF → nhanh
-   │      │        └─ replay phần incr → tới lệnh cuối
-   │      │
-   │      └─ Không → LOAD TỪ dump.rdb
-   │
-   └─ Xong
+```d2 title="Nguồn persistence dùng khi Redis khởi động"
+direction: down
+start: "Redis khởi động"
+aof: "appendonly yes?" {shape: diamond}
+base: "Load BASE\nRDB hoặc AOF theo manifest"
+incr: "Replay INCR AOF theo thứ tự"
+rdb: "Load dump.rdb nếu có"
+ready: "Sẵn sàng phục vụ"
+start -> aof
+aof -> base: "Có — ưu tiên AOF"
+base -> incr
+incr -> ready
+aof -> rdb: "Không"
+rdb -> ready
 ```
 
 > [!WARNING]
@@ -220,12 +209,15 @@ Redis khởi động
 
 [Replication](./replication.md) là **async replication** / **asynchronous** mặc định: master trả lời client **trước khi** replica xác nhận. Nếu master crash ngay sau khi ack client nhưng trước khi lệnh tới replica → lệnh đó **mất**, dù có bao nhiêu replica.
 
-```diagram
-Client ──SET──▶ Master ──(ack ngay)──▶ Client   ✅ "thành công"
-                   │
-                   └──(async, chưa kịp)──✗ CRASH
-                                          │
-                Replica lên làm master → KHÔNG có lệnh đó → MẤT
+```d2 title="ACK của primary không đồng nghĩa replica đã có write"
+shape: sequence_diagram
+c: "Client"
+p: "Primary"
+r: "Replica"
+c -> p: "SET k v"
+p -> c: "OK"
+p."Crash trước khi write tới replica"
+r."Promote — không có write k=v"
 ```
 
 Vì vậy, replication bảo vệ khỏi **mất một máy** (availability), không đảm bảo **không mất dữ liệu** (durability) và không thay thế backup.
@@ -236,14 +228,13 @@ Vì vậy, replication bảo vệ khỏi **mất một máy** (availability), kh
 | Replication | Chết một node (HA) | Mất dữ liệu async, lỗi lan sang mọi replica (vd `FLUSHALL`) |
 | Backup off-site | Đĩa hỏng, xoá nhầm, thảm hoạ | (là lớp phòng thủ cuối) |
 
-```diagram
-Ba lớp phòng thủ độc lập — CẦN CẢ BA cho dữ liệu quan trọng:
-
-  ┌─────────────┐   ┌──────────────┐   ┌────────────────────┐
-  │ Persistence │   │ Replication  │   │ Backup off-site    │
-  │ (RDB/AOF)   │   │ (HA/failover)│   │ (S3/NFS, nhiều gen)│
-  └─────────────┘   └──────────────┘   └────────────────────┘
-   sống qua restart  sống qua chết node  sống qua thảm hoạ đĩa
+```d2 title="Ba lớp phòng thủ độc lập"
+group: "Dữ liệu quan trọng cần phối hợp cả ba lớp" {
+  grid-columns: 3
+  n0: "Persistence — RDB/AOF\nKhôi phục qua restart"
+  n1: "Replication — HA/failover\nChịu lỗi node theo topology"
+  n2: "Backup off-site — nhiều thế hệ\nKhôi phục sau mất đĩa / thảm họa"
+}
 ```
 
 > [!IMPORTANT]
@@ -270,22 +261,23 @@ WAIT 1 100
 
 ## 8. Cây quyết định chọn strategy
 
-```diagram
-Dữ liệu Redis có warm lại được từ nơi khác (DB) không?
-│
-├─ CÓ (cache thuần) ────────────────────────────────────────┐
-│     │                                                     │
-│     └─ Cần tránh cold-start/stampede sau restart?         │
-│           ├─ Không quan trọng ─▶ Không persistence        │
-│           └─ Muốn warm sẵn    ─▶ RDB thưa (save thưa)     │
-│                                                           │
-└─ KHÔNG (Redis là nguồn sự thật, hoặc mất là mất thật) ────┤
-      │                                                     │
-      └─ Chấp nhận mất bao nhiêu khi crash?                 │
-            ├─ Vài phút OK        ─▶ RDB thuần              │
-            ├─ Tối đa ~1 giây     ─▶ Hybrid (AOF everysec + RDB)  ◀── mặc định tốt
-            └─ Gần như 0          ─▶ Hybrid (AOF always) + đĩa nhanh
-                                     + replication + backup off-site
+```d2 title="Cây quyết định persistence theo khả năng warm và RPO"
+direction: down
+warm: "Warm lại được từ DB?" {shape: diamond}
+cold: "Cần tránh cold-start?" {shape: diamond}
+none: "Không persistence"
+sparse: "RDB thưa"
+rpo: "Chấp nhận mất bao nhiêu?" {shape: diamond}
+rdb: "RDB thuần"
+hybrid: "AOF everysec + RDB"
+strong: "AOF always + RDB\nĐĩa đủ nhanh\nReplication + backup off-site"
+warm -> cold: "Có — cache thuần"
+cold -> none: "Không quan trọng"
+cold -> sparse: "Muốn warm sẵn"
+warm -> rpo: "Không"
+rpo -> rdb: "Vài phút"
+rpo -> hybrid: "Khoảng 1 giây"
+rpo -> strong: "Gần 0, theo failure model"
 ```
 
 > [!TIP]
@@ -418,21 +410,13 @@ Persistence strategy nên tiến hoá theo giá trị dữ liệu, không đóng
 
 ### 11.1 Bật AOF always cho cache
 
-```diagram
-❌ Cache warm-lại-được + appendfsync always
-   → trả giá throughput/latency khổng lồ cho độ bền KHÔNG cần
-
-✅ Cache → RDB thuần hoặc no persistence
-```
+- **Tránh:** `appendfsync always` cho cache warm lại được mà không có nhu cầu durability; phải trả thêm throughput/latency.
+- **Cân nhắc:** RDB thưa hoặc không persistence, kèm kế hoạch cold-start.
 
 ### 11.2 Chỉ RDB cho dữ liệu tài chính
 
-```diagram
-❌ Ví tiền + chỉ RDB (save 300...)
-   → crash mất tới 5 phút giao dịch → mất tiền thật
-
-✅ Tài chính → AOF (everysec/always) + replication + backup
-```
+- **Không đủ:** ví tiền chỉ dựa vào RDB `save 300 ...`; crash có thể làm mất các giao dịch sau snapshot.
+- **Cần thiết kế:** AOF theo yêu cầu fsync, replication, backup và failure model của hệ thống tài chính; không coi các cấu hình này tự tạo bảo đảm không mất tiền.
 
 ### 11.3 Tưởng replication là backup/persistence
 
@@ -458,24 +442,24 @@ Hybrid có `BGSAVE` fork + AOF rewrite fork (cả hai CoW) + fsync liên tục. 
 
 ## 12. Checklist chọn & vận hành persistence
 
-```diagram
-Trước khi chốt strategy:
-□ Dữ liệu warm lại được không? (quyết định có cần persistence)
-□ RPO: crash mất tối đa bao nhiêu là chấp nhận được?
-□ RTO: restart/khôi phục trong bao lâu là chấp nhận được?
-□ Workload read-heavy hay write-heavy? (ảnh hưởng CoW/overhead)
-□ Đĩa loại gì? (always cần NVMe/SSD)
-□ Có replication cho HA chưa? (không thay persistence)
-□ Có backup off-site nhiều thế hệ chưa? (không thay được)
+**Trước khi chốt strategy:**
 
-Sau khi bật:
-□ Giám sát rdb_last_bgsave_status / aof_last_write_status
-□ Giám sát rdb_changes_since_last_save (RPO thực)
-□ Giám sát dung lượng đĩa (AOF + RDB tạm cùng lúc)
-□ Chừa RAM cho Copy-on-Write; tắt Transparent Huge Pages (THP)
-□ Benchmark overhead trước khi lên production
-□ Diễn tập restore định kỳ (backup chưa test = chưa có backup)
-```
+- [ ] Xác định dữ liệu có warm lại được không.
+- [ ] Chốt RPO: lượng mất tối đa chấp nhận được khi crash.
+- [ ] Chốt RTO: thời gian restart/khôi phục chấp nhận được.
+- [ ] Đánh giá read-heavy/write-heavy và chi phí CoW.
+- [ ] Kiểm tra đĩa thực tế; benchmark nếu dùng `always`.
+- [ ] Có replication cho HA, không thay persistence.
+- [ ] Có backup off-site nhiều thế hệ, không thay replication.
+
+**Sau khi bật:**
+
+- [ ] Giám sát `rdb_last_bgsave_status` / `aof_last_write_status`.
+- [ ] Theo dõi `rdb_changes_since_last_save` cùng tuổi snapshot để đánh giá RPO thực.
+- [ ] Giám sát dung lượng đĩa cho AOF, RDB và file tạm.
+- [ ] Chừa RAM cho CoW; tắt THP theo khuyến nghị Redis.
+- [ ] Benchmark overhead trước production.
+- [ ] Diễn tập restore định kỳ.
 
 ---
 
@@ -496,21 +480,14 @@ Sau khi bật:
 
 ## 14. Tóm tắt / Cheat sheet
 
-```diagram
-┌──────────────── Redis Persistence Strategy cheat sheet ─────────────────┐
-│ Bắt đầu từ RPO: "crash mất bao nhiêu là chấp nhận được?"                │
-│                                                                         │
-│ Cache warm-lại-được   → no persistence / RDB thưa                       │
-│ Chịu mất vài phút     → RDB thuần (restart nhanh, backup gọn)           │
-│ Mất tối đa ~1 giây    → HYBRID: AOF everysec + RDB   ◀── mặc định tốt   │
-│ Gần như mất 0         → AOF always (NVMe) + repl + backup off-site      │
-│                                                                         │
-│ Khởi động: bật AOF → load AOF (bỏ RDB). Nhớ khi restore!                │
-│ Replication ≠ persistence ≠ backup — CẦN CẢ BA lớp                      │
-│ Hybrid: fork BGSAVE + fork rewrite + fsync → chừa RAM & đĩa             │
-│ Tắt THP. Giám sát RPO thực. Diễn tập restore.                           │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+- Bắt đầu từ RPO và RTO, không chọn persistence chỉ vì mặc định.
+- Cache warm lại được: không persistence hoặc RDB thưa.
+- Chấp nhận mất vài phút: RDB; cần cửa sổ nhỏ hơn: cân nhắc Hybrid với `everysec` hoặc `always`.
+- `always` vẫn phụ thuộc fsync/storage và failure model, không bảo đảm 0 tuyệt đối mọi sự cố.
+- Bật AOF thì start từ nguồn AOF; nhớ điều này khi restore.
+- Persistence, replication và backup giải quyết ba nhóm rủi ro khác nhau.
+- Chừa RAM/đĩa cho fork, CoW, rewrite và fsync; tránh dồn các tác vụ nặng.
+- Giám sát, benchmark và diễn tập restore.
 
 3 nguyên tắc nhớ lâu:
 

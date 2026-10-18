@@ -38,20 +38,16 @@ Một Redis production ổn định cần trả lời được 4 câu hỏi:
 
 Một entry Redis không chỉ gồm bytes của value. Nó thường gồm:
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                         Redis RAM                           │
-├───────────────────────┬─────────────────────────────────────┤
-│ Dataset               │ Key object + value object + metadata│
-│ Expire dictionary     │ TTL metadata cho key có expire      │
-│ Allocator overhead    │ jemalloc slab/arena overhead        │
-│ Fragmentation         │ Lỗ hổng bộ nhớ chưa trả về OS       │
-│ Client buffers        │ Input/output buffer per connection  │
-│ Replication backlog   │ Buffer phục vụ partial resync       │
-│ Lua/functions/cache   │ Script cache, function library      │
-│ Persistence overhead  │ Fork COW khi RDB/AOF rewrite        │
-└───────────────────────┴─────────────────────────────────────┘
-```
+| Thành phần RAM | Ý nghĩa |
+| --- | --- |
+| Dataset | Key object + value object + metadata |
+| Expires dictionary | TTL metadata cho key có expire |
+| Allocator overhead | jemalloc slab/arena overhead |
+| Fragmentation | Memory chưa trả về OS hoặc chưa tái dùng được theo kích thước cần |
+| Client buffers | Input/output per connection |
+| Replication backlog | Buffer phục vụ partial resync |
+| Lua/functions/cache | Script cache, function library |
+| Persistence overhead | Fork CoW khi RDB/AOF rewrite |
 
 ### Vì sao cùng một payload nhưng Redis tốn nhiều hơn?
 
@@ -202,15 +198,10 @@ MEMORY USAGE page:view:1
 
 Nếu có rất nhiều counter nhỏ:
 
-```text
-Không tối ưu:
-page:view:1 -> "100"
-page:view:2 -> "50"
-page:view:3 -> "70"
-
-Tối ưu hơn trong nhiều trường hợp:
-HSET page:views 1 100 2 50 3 70
-```
+| Mô hình | Ví dụ |
+| --- | --- |
+| Nhiều String key riêng | `page:view:1 → 100`, `page:view:2 → 50`, `page:view:3 → 70` |
+| Gom vào Hash khi workload phù hợp | `HSET page:views 1 100 2 50 3 70` |
 
 Hash gom nhiều field nhỏ vào một key, giảm overhead dictionary cấp top-level.
 
@@ -343,15 +334,18 @@ Tìm key tiêu thụ nhiều memory hơn, hữu ích khi cần xử lý OOM.
 
 Redis thường dùng jemalloc. Allocator cấp phát memory theo size class. Khi value được tạo/xóa/cập nhật liên tục với kích thước khác nhau, memory có thể bị phân mảnh.
 
-```text
-Trước:
-[AAAA][BBBB][CCCC][DDDD]
-
-Xóa B và D:
-[AAAA][    ][CCCC][    ]
-
-Cần cấp phát E lớn:
-[AAAA][    ][CCCC][    ]  không có block liên tục đủ lớn
+```d2 mode=steps title="Fragmentation: tổng chỗ trống không đồng nghĩa một vùng đủ lớn"
+layout: "Memory blocks minh họa — không theo tỷ lệ byte" {
+  grid-columns: 4
+  a: AAAA
+  b: BBBB
+  c: CCCC
+  d: DDDD
+}
+steps: {
+  deleted: { layout.b: "Trống"; layout.d: "Trống" }
+  allocate: { layout.label: "Cần E lớn: hai vùng trống rời nhau\nKhông có một block liên tục đủ lớn trong ví dụ" }
+}
 ```
 
 ### Metric cần xem
@@ -414,16 +408,20 @@ replica-lazy-flush yes
 
 Các thao tác như `BGSAVE` và AOF rewrite dùng `fork()`. Process con ghi snapshot/rewrite, process cha tiếp tục phục vụ traffic. Hệ điều hành dùng copy-on-write: page memory chỉ bị copy khi process cha ghi thay đổi vào page đó.
 
-```text
-Before fork:
-Redis parent -> memory pages
-
-After fork:
-Parent and child share pages
-
-Parent writes page X:
-OS copies page X for parent
-Child still sees old page X
+```d2 mode=steps title="Fork chia sẻ pages, ghi mới mới tạo CoW"
+direction: right
+parent: Parent
+page: "Memory page X"
+parent -> page
+steps: {
+  forked: { child: Child; child -> page; page: "Page X — parent và child dùng chung" }
+  copied: {
+    private: "Page X′ — copy cho parent"
+    (parent -> page)[0]: null
+    parent -> private: "Parent writes X"
+    page: "Page X cũ — child vẫn thấy"
+  }
+}
 ```
 
 Nếu workload write-heavy trong lúc fork, COW memory tăng mạnh.
