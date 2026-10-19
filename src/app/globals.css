@@ -20,6 +20,20 @@
   padding-inline: 1rem;
 }
 
+/* Opt-in long flows keep native-size labels and scroll the page, not fit to
+   90vh. The width floor confines horizontal scrolling to the wrapper on mobile.
+   Other diagrams and fullscreen retain their existing height rules. */
+.d2-readable-flow {
+  --d2-viewport-max-height: 160rem;
+  --d2-preview-max-height: none;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.d2-readable-flow > .d2-interactive {
+  min-width: 60rem;
+}
+
 /* Vietnamese text readability */
 .prose {
   line-height: 1.8;

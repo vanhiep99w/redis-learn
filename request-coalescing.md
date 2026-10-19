@@ -732,7 +732,10 @@ SET lease:{product:42}:v1 unique-owner-token NX PX 1000
 
 ### Luồng điều phối
 
-```d2 layout="dagre" title="Kết hợp cache, local singleflight và fleet lease"
+Sơ đồ giữ kích thước chữ để đọc từng bước; cuộn xuống để theo dõi toàn bộ luồng, hoặc cuộn ngang trên màn hình hẹp.
+
+```d2 layout="dagre" scale=1 title="Kết hợp cache, local singleflight và fleet lease"
+# viewport: readable
 direction: down
 get: GET cache
 hit: Hit? {shape: diamond}

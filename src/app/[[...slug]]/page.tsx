@@ -3,7 +3,7 @@ import { DocsPage, DocsBody, DocsTitle, DocsDescription } from 'fumadocs-ui/page
 import { notFound, redirect } from 'next/navigation';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import { D2Diagram } from '@vanhiep99w/docs-kit/components/d2';
-import { D2InteractiveDiagram } from '@vanhiep99w/docs-kit/components/d2-interactive';
+import { DocsD2Diagram as D2InteractiveDiagram } from '@/components/d2-diagram';
 import { TerminalSession } from '@vanhiep99w/docs-kit/components/terminal-session';
 import { CodeDiff } from '@vanhiep99w/docs-kit/components/code-diff';
 import { CodeWalkthrough } from '@vanhiep99w/docs-kit/components/code-walkthrough';

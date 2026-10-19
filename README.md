@@ -97,6 +97,7 @@ app -> db: Query khi cache miss
 ````
 
 - Thêm `mode=steps` cùng `steps: { ... }` khi cần diễn giải nhiều trạng thái; xem [Cluster](./cluster.md) và [Sentinel](./sentinel.md).
+- Với luồng dài cần giữ chữ rõ, đặt `scale=1` trong fence và thêm dòng `# viewport: readable` trong source D2; xem [Luồng điều phối](./request-coalescing.md#luồng-điều-phối). Adapter riêng của site (`src/components/d2-diagram.tsx`) cho cuộn dọc theo bài, cuộn ngang trên màn hình hẹp và đưa node đầu vào vùng nhìn khi viewer tải xong. Không phải option của docs-kit; diagram khác vẫn auto-fit như cũ.
 - Icon từ [D2 Icons](https://icons.d2lang.com/) nên lưu local và ghi nguồn. Icon Redis đã được vendor trong `public/icons/d2/`; script prepare rewrite URL trong fence D2, plugin nhúng icon vào SVG. Thêm icon mới phải bổ sung mapping tương ứng.
 - Không dùng fence `diagram` hay Mermaid: sơ đồ cấu trúc file, memory layout, cây dữ liệu, luồng và sequence đều được cân nhắc D2, không phụ thuộc nhãn fence cũ.
 - Giữ log, RESP payload, công thức/phép tính bit và literal cần căn vị trí ở dạng text. Bảng so sánh, checklist và cheat sheet dùng Markdown thay vì đóng khung ASCII. Ngoại lệ ASCII cần ghi lý do ngay trước fence: `<!-- diagram-text: Lý do cần giữ vị trí ký tự. -->`.
