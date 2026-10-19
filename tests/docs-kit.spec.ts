@@ -80,6 +80,30 @@ test('RDB: cấu trúc dump.rdb là SVG và các trường theo thứ tự file'
   await expect(diagram.locator('.d2-diagram-dark')).toBeVisible();
 });
 
+test('Request coalescing: luồng TALA giữ đủ nhánh và không kéo quá dài', async ({ page }) => {
+  await page.goto('/patterns/request-coalescing/');
+  const diagram = page.locator('.d2-interactive').filter({ hasText: 'Kết hợp cache, local singleflight và fleet lease' });
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate((dark) => document.documentElement.classList.toggle('dark', dark), theme === 'dark');
+    const svg = diagram.locator(`.d2-diagram-${theme} svg`).first();
+    await expect(svg).toBeVisible();
+    expect(await svg.locator('text').allTextContents()).toEqual(expect.arrayContaining([
+      'GET cache', 'Hit?', 'Trả kết quả', 'Tham gia local singleflight',
+      'GET cache lần nữa', 'Vẫn miss?', 'Thử acquire Redis lease', 'Thắng lease?',
+      'GET cache lại', 'Fetch origin', 'Publish khi còn ownership',
+      'Chờ ngắn có jitter rồi GET cache', 'Có dữ liệu?', 'Còn deadline?',
+      'Stale hợp lệ hoặc lỗi có kiểm soát', 'Có', 'Không', 'Chưa', 'Hết deadline',
+    ]));
+    // Guard against returning to a tall, narrow graph that shrinks labels on fit.
+    const { width, height } = await svg.evaluate((element) => {
+      const { width, height } = (element as SVGSVGElement).viewBox.baseVal;
+      return { width, height };
+    });
+    expect(width).toBeGreaterThan(0);
+    expect(height / width).toBeLessThan(1.5);
+  }
+});
+
 test('D2 steps: resharding chuyển qua từng trạng thái', async ({ page }) => {
   await page.goto('/replication-ha/cluster/');
   const diagram = page.locator('.d2-interactive').filter({ hasText: 'Chuyển slot 9842 từ A sang D' });
@@ -125,7 +149,7 @@ test('Span Waterfall phân biệt thời gian call và execute', async ({ page }
 
 test('mobile: diagram cuộn trong khung, không làm tràn trang', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const path of ['/fundamentals/redis-overview/', '/replication-ha/cluster/', '/patterns/caching-patterns/', '/advanced/lua-scripting/', '/persistence/rdb/', '/persistence/aof/', '/data-structures/strings/', '/data-structures/lists/', '/data-structures/sorted-sets/', '/data-structures/streams/']) {
+  for (const path of ['/fundamentals/redis-overview/', '/replication-ha/cluster/', '/patterns/caching-patterns/', '/patterns/request-coalescing/', '/advanced/lua-scripting/', '/persistence/rdb/', '/persistence/aof/', '/data-structures/strings/', '/data-structures/lists/', '/data-structures/sorted-sets/', '/data-structures/streams/']) {
     await page.goto(path);
     await expect(page.locator('.d2-diagram').first()).toBeVisible();
     // The auto-loaded viewer fits after hydration/ResizeObserver has settled.
