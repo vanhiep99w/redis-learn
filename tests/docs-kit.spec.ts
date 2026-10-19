@@ -80,7 +80,7 @@ test('RDB: cấu trúc dump.rdb là SVG và các trường theo thứ tự file'
   await expect(diagram.locator('.d2-diagram-dark')).toBeVisible();
 });
 
-test('Request coalescing: luồng TALA giữ đủ nhánh và không kéo quá dài', async ({ page }) => {
+test('Request coalescing: luồng Dagre giữ đủ nhánh và đi từ trên xuống', async ({ page }) => {
   await page.goto('/patterns/request-coalescing/');
   const diagram = page.locator('.d2-interactive').filter({ hasText: 'Kết hợp cache, local singleflight và fleet lease' });
   for (const theme of ['light', 'dark']) {
@@ -94,13 +94,15 @@ test('Request coalescing: luồng TALA giữ đủ nhánh và không kéo quá d
       'Chờ ngắn có jitter rồi GET cache', 'Có dữ liệu?', 'Còn deadline?',
       'Stale hợp lệ hoặc lỗi có kiểm soát', 'Có', 'Không', 'Chưa', 'Hết deadline',
     ]));
-    // Guard against returning to a tall, narrow graph that shrinks labels on fit.
-    const { width, height } = await svg.evaluate((element) => {
-      const { width, height } = (element as SVGSVGElement).viewBox.baseVal;
-      return { width, height };
-    });
-    expect(width).toBeGreaterThan(0);
-    expect(height / width).toBeLessThan(1.5);
+    // The main path must progress downward, not double back as it did in TALA.
+    const positions = await svg.evaluate((element, labels) => labels.map((label) => {
+      const text = [...element.querySelectorAll('text')].find((node) => node.textContent === label);
+      return text ? text.getBoundingClientRect().top : -1;
+    }), ['GET cache', 'Hit?', 'Tham gia local singleflight', 'GET cache lần nữa',
+      'Thử acquire Redis lease', 'Thắng lease?', 'GET cache lại', 'Fetch origin',
+      'Publish khi còn ownership', 'Trả kết quả']);
+    expect(positions.every((top) => top >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
   }
 });
 
