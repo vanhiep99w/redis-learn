@@ -89,27 +89,7 @@ Xấu: member = {"id":88420,"name":"Alice","avatar":"..."}
 
 Profile thay đổi sẽ biến thành member mới và tạo duplicate logic; member dài cũng tốn memory. Lấy top IDs rồi batch `MGET`/pipeline Hash/profile cache.
 
-> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
-
-```d2 title="2.1. Chỉ lưu ID trong ZSet" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(C -> A)[0]"
-#         description: "Client → API: GET /leaderboards/s27?top=100"
-#       - edge: "(A -> R)[0]"
-#         description: "API → Redis Leaderboard: ZRANGE key 0 99 REV WITHSCORES"
-#       - edge: "(R -> A)[0]"
-#         description: "Redis Leaderboard → API: 100 player IDs + scores"
-#       - edge: "(A -> P)[0]"
-#         description: "API → Profile Cache/DB: Batch get profiles"
-#       - edge: "(P -> A)[0]"
-#         description: "Profile Cache/DB → API: names, avatars"
-#       - edge: "(A -> C)[0]"
-#         description: "API → Client: ranked response"
-# @endflow
+```d2 title="2.1. Chỉ lưu ID trong ZSet"
 shape: sequence_diagram
 C: "Client"
 A: "API"

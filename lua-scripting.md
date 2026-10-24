@@ -38,27 +38,7 @@ nếu stock >= quantity:
 
 Nếu logic chạy ở application, client khác có thể thay đổi stock giữa `GET` và `DECRBY`. `WATCH` giải quyết bằng optimistic retry nhưng cần nhiều round trip. Lua đưa logic đến nơi data đang nằm và thực thi như một đoạn atomic:
 
-> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
-
-```d2 title="1. Vấn đề: logic atomic cần nhiều round trip" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis Lua engine: EVAL reserve.lua keys + arguments"
-#       - edge: "(R -> R)[0]"
-#         description: "Redis Lua engine → Redis Lua engine: GET stock"
-#       - edge: "(R -> R)[1]"
-#         description: "Redis Lua engine → Redis Lua engine: Validate stock"
-#       - edge: "(R -> R)[2]"
-#         description: "Redis Lua engine → Redis Lua engine: DECRBY stock"
-#       - edge: "(R -> R)[3]"
-#         description: "Redis Lua engine → Redis Lua engine: SET reservation"
-#       - edge: "(R -> A)[0]"
-#         description: "Redis Lua engine → Application: structured result"
-# @endflow
+```d2 title="1. Vấn đề: logic atomic cần nhiều round trip"
 shape: sequence_diagram
 A: "Application"
 R: "Redis Lua engine" { icon: https://icons.d2lang.com/dev/redis.svg }

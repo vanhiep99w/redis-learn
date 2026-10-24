@@ -189,33 +189,7 @@ J -> A: "Không"
 
 Luồng chuẩn:
 
-> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
-
-```d2 title="Full sync diễn ra như thế nào?" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(R -> M)[0]"
-#         description: "Replica → Master: PSYNC ? -1 hoặc ID/offset cũ"
-#       - edge: "(M -> R)[0]"
-#         description: "Master → Replica: FULLRESYNC replid offset"
-#       - edge: "(M -> M)[0]"
-#         description: "Master → Master: Fork child để tạo RDB snapshot"
-#       - edge: "(C -> M)[0]"
-#         description: "Client → Master: Write commands trong lúc snapshot"
-#       - edge: "(M -> M)[1]"
-#         description: "Master → Master: Buffer write commands mới"
-#       - edge: "(M -> R)[1]"
-#         description: "Master → Replica: Gửi RDB snapshot"
-#       - edge: "(R -> R)[0]"
-#         description: "Replica → Replica: Xóa dataset cũ, load RDB"
-#       - edge: "(M -> R)[2]"
-#         description: "Master → Replica: Gửi commands đã buffer"
-#       - edge: "(M -> R)[3]"
-#         description: "Master → Replica: Tiếp tục streaming command mới"
-# @endflow
+```d2 title="Full sync diễn ra như thế nào?"
 shape: sequence_diagram
 R: "Replica" { icon: https://icons.d2lang.com/dev/redis.svg }
 M: "Master" { icon: https://icons.d2lang.com/dev/redis.svg }
@@ -403,21 +377,7 @@ Redis replication mặc định là **asynchronous replication**.
 
 Luồng write thông thường:
 
-```d2 title="Asynchronous replication và tính nhất quán" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(Client -> M)[0]"
-#         description: "Client → Master: SET order:1 paid"
-#       - edge: "(M -> Client)[0]"
-#         description: "Master → Client: OK"
-#       - edge: "(M -> R)[0]"
-#         description: "Master → Replica: SET order:1 paid"
-#       - edge: "(R -> M)[0]"
-#         description: "Replica → Master: ACK offset sau đó"
-# @endflow
+```d2 title="Asynchronous replication và tính nhất quán"
 shape: sequence_diagram
 Client: "Client"
 M: "Master" { icon: https://icons.d2lang.com/dev/redis.svg }
@@ -542,23 +502,7 @@ lb -> c: Reads
 
 Kịch bản lỗi phổ biến:
 
-```d2 title="Read-your-writes problem" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(User -> App)[0]"
-#         description: "User → App: Update profile name"
-#       - edge: "(App -> M)[0]"
-#         description: "App → Master: SET user:1:name \"An\""
-#       - edge: "(M -> App)[0]"
-#         description: "Master → App: OK"
-#       - edge: "(App -> R)[0]"
-#         description: "App → Replica: GET user:1:name"
-#       - edge: "(R -> App)[0]"
-#         description: "Replica → App: old name"
-# @endflow
+```d2 title="Read-your-writes problem"
 shape: sequence_diagram
 User: "User"
 App: "App"

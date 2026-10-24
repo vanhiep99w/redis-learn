@@ -202,21 +202,7 @@ async function getProduct(id: string): Promise<Product | null> {
 
 Với cache-aside, cách an toàn và đơn giản thường là:
 
-```d2 title="3.2. Write flow: update DB rồi xóa cache" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(A -> D)[0]"
-#         description: "Application → Database: UPDATE product SET price=..."
-#       - edge: "(D -> A)[0]"
-#         description: "Database → Application: COMMIT OK"
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis: DEL cache:product:v3:42"
-#       - edge: "(R -> A)[0]"
-#         description: "Redis → Application: deleted"
-# @endflow
+```d2 title="3.2. Write flow: update DB rồi xóa cache"
 shape: sequence_diagram
 A: "Application"
 D: "Database"
@@ -365,29 +351,7 @@ async function updateUser(id: string, input: UpdateUserInput) {
 }
 ```
 
-```d2 title="Write-around và lần đọc tiếp theo" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(app -> db)[0]"
-#         description: "Application → Database: UPDATE DB"
-#       - edge: "(db -> app)[0]"
-#         description: "Database → Application: COMMIT"
-#       - edge: "(app -> cache)[0]"
-#         description: "Application → Redis cache: DEL cache"
-#       - edge: "(app -> cache)[1]"
-#         description: "Application → Redis cache: GET cache"
-#       - edge: "(cache -> app)[0]"
-#         description: "Redis cache → Application: Miss"
-#       - edge: "(app -> db)[1]"
-#         description: "Application → Database: Loader đọc DB"
-#       - edge: "(db -> app)[1]"
-#         description: "Database → Application: Value"
-#       - edge: "(app -> cache)[2]"
-#         description: "Application → Redis cache: SET cache"
-# @endflow
+```d2 title="Write-around và lần đọc tiếp theo"
 shape: sequence_diagram
 app: Application
 db: Database
@@ -419,25 +383,7 @@ Dùng khi muốn chuẩn hóa data-access cho nhiều module/service và có m�
 
 Write-through cập nhật source of truth và cache đồng bộ trước khi trả thành công.
 
-```d2 title="5. Write-through: ghi cache và database trên request path" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(C -> A)[0]"
-#         description: "Client → Application: PUT /products/42"
-#       - edge: "(A -> D)[0]"
-#         description: "Application → Database: UPDATE product"
-#       - edge: "(D -> A)[0]"
-#         description: "Database → Application: COMMIT OK"
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis: SET cache:product:v3:42 ... EX 300"
-#       - edge: "(R -> A)[0]"
-#         description: "Redis → Application: OK"
-#       - edge: "(A -> C)[0]"
-#         description: "Application → Client: 200 OK"
-# @endflow
+```d2 title="5. Write-through: ghi cache và database trên request path"
 shape: sequence_diagram
 C: "Client"
 A: "Application"
@@ -504,32 +450,7 @@ Nếu write-heavy nhưng object ít được đọc, mỗi write đang tạo pay
 
 Write-behind, hay write-back, xác nhận write sau khi ghi Redis rồi đẩy thay đổi xuống database bất đồng bộ.
 
-```d2 title="6. Write-behind: ghi cache trước, đồng bộ database sau" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: accept
-#     label: "Request: nhận thay đổi"
-#     steps:
-#       - edge: "(C -> A)[0]"
-#         description: "Client → Application: Update counter/profile"
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis: Atomic update"
-#       - edge: "(A -> S)[0]"
-#         description: "Application → Stream/Queue: Append durable change event"
-#       - edge: "(A -> C)[0]"
-#         description: "Application → Client: Accepted"
-#   - id: persist
-#     label: "Worker: ghi database"
-#     steps:
-#       - edge: "(W -> S)[0]"
-#         description: "Writer worker → Stream/Queue: Read batch"
-#       - edge: "(W -> D)[0]"
-#         description: "Writer worker → Database: Upsert batch"
-#       - edge: "(D -> W)[0]"
-#         description: "Database → Writer worker: Commit"
-#       - edge: "(W -> S)[1]"
-#         description: "Writer worker → Stream/Queue: ACK"
-# @endflow
+```d2 title="6. Write-behind: ghi cache trước, đồng bộ database sau"
 shape: sequence_diagram
 C: "Client"
 A: "Application"
@@ -546,8 +467,6 @@ W -> D: "Upsert batch"
 D -> W: "Commit" { style.stroke-dash: 4 }
 W -> S: "ACK"
 ```
-
-Request nhận thay đổi và worker ghi database là hai giai đoạn riêng. Accepted không chứng minh database đã được đồng bộ.
 
 Pattern này giảm write latency và batch được nhiều update, nhưng lúc này Redis/queue nằm trên đường durability. Cần trả lời:
 
@@ -768,23 +687,7 @@ Update product 42 không dễ biết mọi query cache chứa nó.
 
 ### 10.2. Event-driven invalidation
 
-```d2 title="10.2. Event-driven invalidation" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(W -> D)[0]"
-#         description: "Product Service → Database: UPDATE product + outbox event"
-#       - edge: "(D -> W)[0]"
-#         description: "Database → Product Service: COMMIT"
-#       - edge: "(O -> I)[0]"
-#         description: "Outbox/CDC → Cache invalidator: ProductUpdated(id=42, version=18)"
-#       - edge: "(I -> R)[0]"
-#         description: "Cache invalidator → Redis: UNLINK cache:product:v3:42"
-#       - edge: "(I -> R)[1]"
-#         description: "Cache invalidator → Redis: DEL related index keys"
-# @endflow
+```d2 title="10.2. Event-driven invalidation"
 shape: sequence_diagram
 W: "Product Service"
 D: "Database"

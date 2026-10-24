@@ -72,27 +72,7 @@ R -> A1: "userId, roles, timestamps"
 
 > Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
 
-```d2 title="2.1. Login flow" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(U -> A)[0]"
-#         description: "Browser → Auth Service: POST /login + credentials"
-#       - edge: "(A -> D)[0]"
-#         description: "Auth Service → User DB: Verify user/password/MFA"
-#       - edge: "(D -> A)[0]"
-#         description: "User DB → Auth Service: user + auth version"
-#       - edge: "(A -> A)[0]"
-#         description: "Auth Service → Auth Service: Generate 256-bit random session ID"
-#       - edge: "(A -> R)[0]"
-#         description: "Auth Service → Redis: SET sess:<hash(sid)> payload EX 1800"
-#       - edge: "(R -> A)[0]"
-#         description: "Redis → Auth Service: OK"
-#       - edge: "(A -> U)[0]"
-#         description: "Auth Service → Browser: Set-Cookie sid=... với HttpOnly, Secure, SameSite=Lax"
-# @endflow
+```d2 title="2.1. Login flow"
 shape: sequence_diagram
 U: "Browser"
 A: "Auth Service"
@@ -313,25 +293,7 @@ Cookie `Max-Age`/`Expires` và Redis TTL nên nhất quán, nhưng Redis là quy
 
 **Session fixation** xảy ra khi attacker biết/chọn session ID trước lúc victim login, rồi session đó được nâng thành authenticated session. Cách phòng vệ: luôn rotate ID sau login và sau thay đổi privilege.
 
-```d2 title="6. Login, session rotation và chống fixation" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(U -> A)[0]"
-#         description: "Browser → App: Login với anonymous sid_old"
-#       - edge: "(A -> A)[0]"
-#         description: "App → App: Verify credentials"
-#       - edge: "(A -> A)[1]"
-#         description: "App → App: Generate sid_new"
-#       - edge: "(A -> R)[0]"
-#         description: "App → Redis: Create sess:<sid_new> authenticated"
-#       - edge: "(A -> R)[1]"
-#         description: "App → Redis: DEL sess:<sid_old>"
-#       - edge: "(A -> U)[0]"
-#         description: "App → Browser: Replace cookie bằng sid_new"
-# @endflow
+```d2 title="6. Login, session rotation và chống fixation"
 shape: sequence_diagram
 U: "Browser"
 A: "App"
