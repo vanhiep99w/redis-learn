@@ -523,7 +523,21 @@ Sentinel-aware client thường cần config:
 
 Client không hard-code IP master. Thay vào đó:
 
-```d2 title="Client hỏi Sentinel rồi kết nối thẳng Redis"
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="Client hỏi Sentinel rồi kết nối thẳng Redis" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(app -> sentinel)[0]"
+#         description: "App → Sentinel: Master của mymaster là ai?"
+#       - edge: "(sentinel -> app)[0]"
+#         description: "Sentinel → App: 10.0.0.12:6379"
+#       - edge: "(app -> redis)[0]"
+#         description: "App → Redis 10.0.0.12:6379: Gửi command"
+# @endflow
 shape: sequence_diagram
 app: App
 sentinel: Sentinel

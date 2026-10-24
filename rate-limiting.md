@@ -158,21 +158,48 @@ Lưu timestamp của từng request trong Sorted Set. Mỗi check:
 3. Nếu dưới limit, thêm request hiện tại.
 4. Đặt TTL cleanup.
 
-```d2 title="5. Sliding window log"
-shape: sequence_diagram
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="5. Sliding window log" layout=dagre mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: allow
+#     label: "Còn quota"
+#     steps:
+#       - edge: "(A -> R)[0]"
+#         description: "API → Redis: Lua(key, now, window, limit, uniqueId)"
+#       - edge: "(R -> R)[0]"
+#         description: "Redis → Redis: ZREMRANGEBYSCORE old entries"
+#       - edge: "(R -> R)[1]"
+#         description: "Redis → Redis: ZCARD"
+#       - edge: "(R -> R)[2]"
+#         description: "Redis → Redis: ZADD now uniqueId + PEXPIRE"
+#       - edge: "(R -> A)[0]"
+#         description: "Redis → API: allowed, remaining, reset"
+#   - id: deny
+#     label: "Đã đủ quota"
+#     steps:
+#       - edge: "(A -> R)[0]"
+#         description: "API → Redis: Lua(key, now, window, limit, uniqueId)"
+#       - edge: "(R -> R)[0]"
+#         description: "Redis → Redis: ZREMRANGEBYSCORE old entries"
+#       - edge: "(R -> R)[1]"
+#         description: "Redis → Redis: ZCARD"
+#       - edge: "(R -> R)[3]"
+#         description: "Redis → Redis: read oldest timestamp"
+#       - edge: "(R -> A)[1]"
+#         description: "Redis → API: denied, retryAfter"
+# @endflow
+direction: right
 A: "API"
 R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
 A -> R: "Lua(key, now, window, limit, uniqueId)"
 R -> R: "ZREMRANGEBYSCORE old entries"
 R -> R: "ZCARD"
-branch_1: "alt: count < limit (nhánh thay thế)" {
-  R -> R: "ZADD now uniqueId + PEXPIRE"
-  R -> A: "allowed, remaining, reset" { style.stroke-dash: 4 }
-}
-branch_2: "else: full (nhánh thay thế)" {
-  R -> R: "read oldest timestamp"
-  R -> A: "denied, retryAfter" { style.stroke-dash: 4 }
-}
+R -> R: "ZADD now uniqueId + PEXPIRE"
+R -> A: "allowed, remaining, reset" { style.stroke-dash: 4 }
+R -> R: "read oldest timestamp"
+R -> A: "denied, retryAfter" { style.stroke-dash: 4 }
 ```
 
 Lua minh họa:

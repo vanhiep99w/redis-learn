@@ -176,7 +176,35 @@ Hầu hết client cung cấp transaction object hoặc callback giữ dedicated
 
 Trong giai đoạn queue, Redis kiểm tra command có hợp lệ về syntax/arity và lưu command + arguments. Redis chưa thực thi data operation.
 
-```d2 title="4. Bên trong EXEC: queue trước, thực thi tuần tự sau"
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="4. Bên trong EXEC: queue trước, thực thi tuần tự sau" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(C -> R)[0]"
+#         description: "Client → Redis: MULTI"
+#       - edge: "(R -> C)[0]"
+#         description: "Redis → Client: OK"
+#       - edge: "(C -> R)[1]"
+#         description: "Client → Redis: SET a 1"
+#       - edge: "(R -> C)[1]"
+#         description: "Redis → Client: QUEUED"
+#       - edge: "(C -> R)[2]"
+#         description: "Client → Redis: INCR b"
+#       - edge: "(R -> C)[2]"
+#         description: "Redis → Client: QUEUED"
+#       - edge: "(C -> R)[3]"
+#         description: "Client → Redis: EXEC"
+#       - edge: "(R -> R)[0]"
+#         description: "Redis → Redis: Execute SET a 1"
+#       - edge: "(R -> R)[1]"
+#         description: "Redis → Redis: Execute INCR b"
+#       - edge: "(R -> C)[3]"
+#         description: "Redis → Client: [OK, 1]"
+# @endflow
 shape: sequence_diagram
 C: "Client"
 R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
@@ -571,7 +599,21 @@ Không đọc replica ngay sau transaction và kỳ vọng read-your-write nếu
 
 ### 12.4. Transaction không bao phủ external side effect
 
-```d2 title="Redis transaction không bao phủ payment API bên ngoài"
+```d2 title="Redis transaction không bao phủ payment API bên ngoài" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(a -> r)[0]"
+#         description: "Application → Redis: MULTI … EXEC"
+#       - edge: "(r -> a)[0]"
+#         description: "Redis → Application: Ghi Redis thành công"
+#       - edge: "(a -> payment)[0]"
+#         description: "Application → Payment API: Gọi payment API"
+#       - edge: "(payment -> a)[0]"
+#         description: "Payment API → Application: Thất bại"
+# @endflow
 shape: sequence_diagram
 a: "Application"
 r: "Redis"

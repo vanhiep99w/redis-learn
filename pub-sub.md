@@ -413,7 +413,23 @@ Redis giữ order message theo connection/channel trong điều kiện bình th�
 
 ### 11.1. Cache invalidation
 
-```d2 title="11.1. Cache invalidation"
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="11.1. Cache invalidation" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(W -> D)[0]"
+#         description: "Writer → DB: COMMIT Product 42 version 18"
+#       - edge: "(W -> R)[0]"
+#         description: "Writer → Redis Pub/Sub: PUBLISH invalidate {id:42,v:18}"
+#       - edge: "(R -> A)[0]"
+#         description: "Redis Pub/Sub → App L1 caches: invalidate"
+#       - edge: "(A -> A)[0]"
+#         description: "App L1 caches → App L1 caches: evict local product 42"
+# @endflow
 shape: sequence_diagram
 W: "Writer"
 D: "DB"

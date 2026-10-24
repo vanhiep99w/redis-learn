@@ -338,7 +338,25 @@ GET user:100
 
 ### Luồng routing bình thường
 
-```d2 title="Luồng routing bình thường"
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="Luồng routing bình thường" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(App -> A)[0]"
+#         description: "App → Node A: GET user:100"
+#       - edge: "(A -> App)[0]"
+#         description: "Node A → App: MOVED 9842 Node B"
+#       - edge: "(App -> B)[0]"
+#         description: "App → Node B: GET user:100"
+#       - edge: "(B -> App)[0]"
+#         description: "Node B → App: value"
+#       - edge: "(App -> App)[0]"
+#         description: "App → App: Cache slot 9842 -> Node B"
+# @endflow
 shape: sequence_diagram
 App: "App"
 A: "Node A"

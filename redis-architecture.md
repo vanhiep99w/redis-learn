@@ -254,7 +254,39 @@ SET user:1:name "Hiep" EX 300
 
 Luồng chi tiết:
 
-```d2 title="Vòng đời một command"
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="Vòng đời một command" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(C -> K)[0]"
+#         description: "Client → Kernel: RESP bytes"
+#       - edge: "(K -> E)[0]"
+#         description: "Kernel → Event Loop: socket readable"
+#       - edge: "(E -> E)[0]"
+#         description: "Event Loop → Event Loop: read vào query buffer"
+#       - edge: "(E -> P)[0]"
+#         description: "Event Loop → Parser: parse command + args"
+#       - edge: "(P -> E)[0]"
+#         description: "Parser → Event Loop: [SET, user:1:name, Hiep, EX, 300]"
+#       - edge: "(E -> X)[0]"
+#         description: "Event Loop → Executor: lookup setCommand"
+#       - edge: "(X -> X)[0]"
+#         description: "Executor → Executor: ACL + arity + flags + memory checks"
+#       - edge: "(X -> D)[0]"
+#         description: "Executor → Keyspace: write key + expire timestamp"
+#       - edge: "(X -> A)[0]"
+#         description: "Executor → AOF/Replication: propagate command"
+#       - edge: "(X -> E)[0]"
+#         description: "Executor → Event Loop: reply OK"
+#       - edge: "(E -> K)[0]"
+#         description: "Event Loop → Kernel: flush output buffer"
+#       - edge: "(K -> C)[0]"
+#         description: "Kernel → Client: +OK"
+# @endflow
 shape: sequence_diagram
 C: "Client"
 K: "Kernel"
