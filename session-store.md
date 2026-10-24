@@ -70,8 +70,6 @@ R -> A1: "userId, roles, timestamps"
 
 ### 2.1. Login flow
 
-> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
-
 ```d2 title="2.1. Login flow"
 shape: sequence_diagram
 U: "Browser"
@@ -89,50 +87,23 @@ A -> U: "Set-Cookie sid=... với HttpOnly, Secure, SameSite=Lax" { style.stroke
 
 ### 2.2. Authenticated request flow
 
-```d2 title="2.2. Authenticated request flow" layout=dagre mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: valid
-#     label: "Session hợp lệ"
-#     steps:
-#       - edge: "(U -> A)[0]"
-#         description: "Browser → Application: GET /account + sid cookie"
-#       - edge: "(A -> A)[0]"
-#         description: "Application → Application: Parse and validate cookie format"
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis: GET sess:<hash(sid)>"
-#       - edge: "(R -> A)[0]"
-#         description: "Redis → Application: userId, expiry, roles/version"
-#       - edge: "(A -> A)[1]"
-#         description: "Application → Application: Authorize request"
-#       - edge: "(A -> U)[0]"
-#         description: "Application → Browser: 200 response"
-#   - id: missing
-#     label: "Session thiếu/hết hạn/revoked"
-#     steps:
-#       - edge: "(U -> A)[0]"
-#         description: "Browser → Application: GET /account + sid cookie"
-#       - edge: "(A -> A)[0]"
-#         description: "Application → Application: Parse and validate cookie format"
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis: GET sess:<hash(sid)>"
-#       - edge: "(R -> A)[1]"
-#         description: "Redis → Application: nil"
-#       - edge: "(A -> U)[1]"
-#         description: "Application → Browser: 401 + clear cookie"
-# @endflow
-direction: right
+```d2 title="2.2. Authenticated request flow"
+shape: sequence_diagram
 U: "Browser"
 A: "Application"
 R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
 U -> A: "GET /account + sid cookie"
 A -> A: "Parse and validate cookie format"
 A -> R: "GET sess:<hash(sid)>"
-R -> A: "userId, expiry, roles/version" { style.stroke-dash: 4 }
-A -> A: "Authorize request"
-A -> U: "200 response" { style.stroke-dash: 4 }
-R -> A: "nil" { style.stroke-dash: 4 }
-A -> U: "401 + clear cookie" { style.stroke-dash: 4 }
+branch_1: "alt: Session tồn tại và hợp lệ (nhánh thay thế)" {
+  R -> A: "userId, expiry, roles/version" { style.stroke-dash: 4 }
+  A -> A: "Authorize request"
+  A -> U: "200 response" { style.stroke-dash: 4 }
+}
+branch_2: "else: Missing/expired/revoked (nhánh thay thế)" {
+  R -> A: "nil" { style.stroke-dash: 4 }
+  A -> U: "401 + clear cookie" { style.stroke-dash: 4 }
+}
 ```
 
 Tách hai khái niệm:

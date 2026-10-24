@@ -120,54 +120,25 @@ Cache-aside, còn gọi là lazy loading, là pattern phổ biến nhất. Appli
 
 ### 3.1. Read flow
 
-> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
-
-```d2 title="3.1. Read flow" layout=dagre mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: hit
-#     label: "Cache hit"
-#     steps:
-#       - edge: "(C -> A)[0]"
-#         description: "Client → Application: GET /products/42"
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis: GET cache:product:v3:42"
-#       - edge: "(R -> A)[0]"
-#         description: "Redis → Application: JSON product"
-#       - edge: "(A -> C)[0]"
-#         description: "Application → Client: 200 product"
-#   - id: miss
-#     label: "Cache miss"
-#     steps:
-#       - edge: "(C -> A)[0]"
-#         description: "Client → Application: GET /products/42"
-#       - edge: "(A -> R)[0]"
-#         description: "Application → Redis: GET cache:product:v3:42"
-#       - edge: "(R -> A)[1]"
-#         description: "Redis → Application: nil"
-#       - edge: "(A -> D)[0]"
-#         description: "Application → Database: SELECT product 42"
-#       - edge: "(D -> A)[0]"
-#         description: "Database → Application: product row"
-#       - edge: "(A -> R)[1]"
-#         description: "Application → Redis: SET key value EX 300"
-#       - edge: "(A -> C)[1]"
-#         description: "Application → Client: 200 product"
-# @endflow
-direction: right
+```d2 title="3.1. Read flow"
+shape: sequence_diagram
 C: "Client"
 A: "Application"
 R: "Redis" { icon: https://icons.d2lang.com/dev/redis.svg }
 D: "Database"
 C -> A: "GET /products/42"
 A -> R: "GET cache:product:v3:42"
-R -> A: "JSON product" { style.stroke-dash: 4 }
-A -> C: "200 product" { style.stroke-dash: 4 }
-R -> A: "nil" { style.stroke-dash: 4 }
-A -> D: "SELECT product 42"
-D -> A: "product row" { style.stroke-dash: 4 }
-A -> R: "SET key value EX 300"
-A -> C: "200 product" { style.stroke-dash: 4 }
+branch_1: "alt: Cache hit (nhánh thay thế)" {
+  R -> A: "JSON product" { style.stroke-dash: 4 }
+  A -> C: "200 product" { style.stroke-dash: 4 }
+}
+branch_2: "else: Cache miss (nhánh thay thế)" {
+  R -> A: "nil" { style.stroke-dash: 4 }
+  A -> D: "SELECT product 42"
+  D -> A: "product row" { style.stroke-dash: 4 }
+  A -> R: "SET key value EX 300"
+  A -> C: "200 product" { style.stroke-dash: 4 }
+}
 ```
 
 Pseudo-code:
